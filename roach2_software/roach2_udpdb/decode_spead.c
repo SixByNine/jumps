@@ -1,5 +1,7 @@
 #include "decode_spead.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
 
 
 /*
@@ -97,9 +99,24 @@ unsigned char const* decode_roach2_spead_packet(unsigned char const* heap, uint6
 
     } // for each item in header.
 
+    assert(data_offset==0);
 
     // the data starts after the header, and after the item pointers, plus whatever offset is specified (probably zero).
-    unsigned char const* data_pointer = heap + 8 * number_of_items*item_width + data_offset;
+    unsigned char const* data_pointer = heap + 8 + number_of_items*item_width + data_offset;
+
+
+    // These lines commented below were added to just quickly dump a packet to see if it made any sense... Clean them up later.
+    /*
+       FILE* f = fopen("pkt.dmp","wb");
+       fwrite(heap,1,4096,f);
+       fclose(f);
+       f = fopen("data.dmp","wb");
+       fwrite(data_pointer,1,4096,f);
+       fclose(f);
+       exit(0);
+       */
+    /////
+
     return data_pointer;
 }
 

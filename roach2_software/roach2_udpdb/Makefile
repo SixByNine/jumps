@@ -1,7 +1,7 @@
 PSRDADA = /opt/psr_dev
 
 # Compiling flags   
-CFLAGS = -g -I$(PSRDADA)/include/ # The dada_hdu.h file is in this directory
+CFLAGS = -O2 -I$(PSRDADA)/include/ # The dada_hdu.h file is in this directory
 
 # Linking flags                                                               
 LFLAGS = $(PSRDADA)/lib/libpsrdada.so -lm -lpthread -L/usr/local/cuda/lib64 -lcudart -L/usr/lib64 -lstdc++
