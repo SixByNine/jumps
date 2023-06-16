@@ -37,7 +37,7 @@
  *     8/200/512/128, 10/150/513/171, 12/100/512/256, 14/50/512/512*
  *
  */
-unsigned char const* decode_roach2_spead_packet(unsigned char const* heap, uint64_t* data_size, uint64_t* frame_counter, uint64_t* band_select) {
+char const* decode_roach2_spead_packet(unsigned char const* heap, uint64_t* data_size, uint64_t* frame_counter, uint64_t* band_select) {
 
     const uint8_t magic = heap[0];
 
@@ -102,20 +102,8 @@ unsigned char const* decode_roach2_spead_packet(unsigned char const* heap, uint6
     assert(data_offset==0);
 
     // the data starts after the header, and after the item pointers, plus whatever offset is specified (probably zero).
-    unsigned char const* data_pointer = heap + 8 + number_of_items*item_width + data_offset;
+    char const* data_pointer = heap + 8 + number_of_items*item_width + data_offset;
 
-
-    // These lines commented below were added to just quickly dump a packet to see if it made any sense... Clean them up later.
-    /*
-       FILE* f = fopen("pkt.dmp","wb");
-       fwrite(heap,1,4096,f);
-       fclose(f);
-       f = fopen("data.dmp","wb");
-       fwrite(data_pointer,1,4096,f);
-       fclose(f);
-       exit(0);
-       */
-    /////
 
     return data_pointer;
 }

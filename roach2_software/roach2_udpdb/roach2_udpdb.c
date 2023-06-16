@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -60,8 +61,11 @@ int main (int argc, char **argv)
     char ip_address[128];
     int portnum = 12000;
     char verbose = 0;
+    char force_start_without_1pps = 0;
     char arg;
     struct timeval tv;
+    struct timeval start_time;
+    struct timeval end_time;
 
     unsigned char* packet_buffer = malloc(PACKET_BUFFER_SIZE);
 
@@ -74,7 +78,10 @@ int main (int argc, char **argv)
 
     multilog(log,LOG_DEBUG,"Debug verbosity\n");
 
-    while ((arg = getopt(argc, argv, "i:k:p:vH:I:")) != -1) {
+    //if (dada_bind_thread_to_core(0) < 0)
+    //    multilog(log, LOG_WARNING, "receive_obs: failed to bind to core %d\n", 0);
+
+    while ((arg = getopt(argc, argv, "i:k:p:vH:I:F")) != -1) {
         switch (arg) {
             case 'v':
                 verbose=1;
@@ -87,6 +94,9 @@ int main (int argc, char **argv)
                 break;
             case 'p':
                 sscanf(optarg,"%d",&portnum);
+                break;
+            case 'F':
+                force_start_without_1pps=1;
                 break;
             case 'i':
                 strncpy(obsid,optarg,STRLEN);
@@ -191,7 +201,7 @@ int main (int argc, char **argv)
     uint64_t frame_counter=0;
     uint64_t band_select=0;
     uint64_t data_size=0;
-    unsigned char const* data_pointer=0;
+    char const* data_pointer=0;
     uint64_t expect_frame_count=0;
 
     multilog(log,LOG_INFO,"Waiting for frame counter reset...\n");
@@ -219,6 +229,10 @@ int main (int argc, char **argv)
         if ((wait_count %100000) == 0) {
             int64_t lost_packets = ((int64_t)frame_counter-(int64_t)expect_frame_count)/64;
             multilog(log,LOG_INFO,"Packets recieved: %07"PRIu64"  Last frame counter: %012"PRIu64" Expected %012"PRIu64" Lost packets = %"PRIi64" \n",wait_count,frame_counter,expect_frame_count,((int64_t)frame_counter-(int64_t)expect_frame_count)/64);
+            if(wait_count > 400000 && force_start_without_1pps) {
+                multilog(log,LOG_WARNING,"STARTING WITHOUT WAITING FOR 1PPS!!!!\n");
+                break;
+            }
         }
 
         ++wait_count;
@@ -226,10 +240,10 @@ int main (int argc, char **argv)
 
     // part 2.2 - set the start time and write the header to the dada buffer
     // We should have just started at the current UTC second.
-    gettimeofday(&tv, NULL);
+    gettimeofday(&start_time, NULL);
 
-    time_t rounded_start_time = tv.tv_sec;
-    double fractional_second = tv.tv_usec/1e6;
+    time_t rounded_start_time = start_time.tv_sec;
+    double fractional_second = start_time.tv_usec/1e6;
     if (fractional_second > 0.5) {
         ++rounded_start_time; // round time up if we are above half a second.
         fractional_second -= 1.0;
@@ -272,110 +286,91 @@ int main (int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+
+
+
+    //write the first data packet
+    ipcio_write (hdu->data_block, data_pointer, data_size);
+
+
     const uint_fast32_t frame_increment = 64; // This is only true for band_select=0
     const uint64_t expect_data_size=4096; // This is true only for band_select=0
     const uint64_t frame_increment_per_block = frame_increment * packets_per_block;
 
-    uint64_t block_start_frame_counter = 0;
+    uint64_t block_start_frame_counter = frame_counter;
 
-    uint64_t blocks_left_to_be_read = 25; // @TODO: Set this logically.
 
     uint_fast8_t holdover_packet = 1; // Set to 1 to ensure the frame=0 packet is written to the buffer
 
     // Part 3. Capture some data!
+    //
+    char* empty_data_pointer = malloc(expect_data_size);
+    memset(empty_data_pointer,0,expect_data_size);
+    memcpy(empty_data_pointer,data_pointer,data_size); // use the first packet as filler... not good but whatever for now
 
-    while (blocks_left_to_be_read > 0) {
+    uint64_t dropped_packets=0;
+    uint64_t packets_to_read = packets_per_block * 900;
+    uint64_t packets_read = 1;
+    uint64_t nextblock = packets_per_block;
 
-        uint64_t badpackets = 0;
-        uint64_t block_id;
-        char * block = ipcio_open_block_write (hdu->data_block, &block_id);
-        //multilog(log,LOG_DEBUG," *block >> %p\n",block);
-        memset(block,0,dada_block_size); // zero the block initially
+    multilog(log,LOG_INFO,"Packets to read %"PRIu64"\n",packets_to_read);
 
-        uint_fast32_t packets_left = packets_per_block;
+    while (packets_read < packets_to_read) {
 
-        if (holdover_packet) {
-            // Catch the case that we have a packet still in memory that needs to be written
-            // This definitely happens at the start with the zero packet
-            // But can also happen if we dropped packets.
-            int64_t position_in_frame = (frame_counter - block_start_frame_counter)/frame_increment;
-            if(position_in_frame >= packets_per_block) {
-                // Here the packet we have held over doesn't even go in the next buffer.
-                // ... we must have lost a lot of packets
+        if (packets_read > nextblock) {
+            multilog(log,LOG_INFO,"New block. Dropped Packets so far  %"PRIu64"/%"PRIu64" %lf%%\n",dropped_packets,packets_read,100.0*(double)dropped_packets/(double)packets_read);
 
-                // @TODO: This is copy-pasted from the end of the loop - there is for sure a better way!
-
-                if (ipcio_close_block_write (hdu->data_block, dada_block_size) < 0)
-                {
-                    multilog (log, LOG_ERR, "ipcio_close_block_write failed\n");
-                    return EXIT_FAILURE;
-                }
-
-                --blocks_left_to_be_read;
-                block_start_frame_counter += frame_increment_per_block; 
-
-                continue;
-            }
-            memcpy(block+position_in_frame*expect_data_size, data_pointer, data_size);
-            --packets_left;
-            holdover_packet = 0;
+            nextblock += packets_per_block;
         }
 
-        while (packets_left > 0) { // in theory we could just loop forever?
-            // get a packet.
-            ssize_t size = recv(sock, (void*)packet_buffer,PACKET_BUFFER_SIZE,0);
-            if (size == -1 ){
-                if (errno==EAGAIN) {
-                    multilog(log,LOG_ERR,"No packets recieved within 5 seconds whilst streaming data... [ERRNO=%d '%s']\n",errno,strerror(errno));
-                    return EXIT_FAILURE;
-                } else {
-                    multilog(log,LOG_ERR,"error getting packet [ERRNO=%d %s]\n",errno,strerror(errno));
-                    return EXIT_FAILURE;
-                }
+        // try to read a packet.
+        ssize_t size = recv(sock, (void*)packet_buffer,PACKET_BUFFER_SIZE,0);
+        if (size == -1 ){
+            if (errno==EAGAIN) {
+                multilog(log,LOG_ERR,"No packets recieved within 5 seconds whilst streaming data... [ERRNO=%d '%s']\n",errno,strerror(errno));
+                return EXIT_FAILURE;
+            } else {
+                multilog(log,LOG_ERR,"error getting packet [ERRNO=%d %s]\n",errno,strerror(errno));
+                return EXIT_FAILURE;
             }
-            data_pointer = decode_roach2_spead_packet(packet_buffer, &data_size, &frame_counter, &band_select);
-            assert(band_select==0);
-            assert(data_size==expect_data_size);
-
-            //multilog(log,LOG_DEBUG," >> %"PRIu64" > %"PRIu64" >> %"PRIu64"\n",blocks_left_to_be_read,packets_left,frame_counter);
-
-            // check position in block from frame counter.
-            int64_t position_in_frame = (frame_counter - block_start_frame_counter)/frame_increment;
-            if(position_in_frame < 0) {
-                // this belongs in a previous frame.
-                multilog(log,LOG_WARNING,"out of sequence frame counter %"PRIu64" Block start: %"PRIu64"\n",frame_counter,block_start_frame_counter);
-                ++badpackets;
-                if (badpackets > packets_per_block) { 
-                    multilog(log,LOG_ERR,"too many out of sequence packets... aborting\n");
-                    return EXIT_FAILURE;
-                }
-                continue;
-            }
-            if(position_in_frame >= packets_per_block) {
-                multilog(log,LOG_WARNING,"out of sequence frame counter %"PRIu64" Block end: %"PRIu64"\n",frame_counter,block_start_frame_counter+packets_per_block*frame_increment);
-                // this packet belongs in the next block
-                holdover_packet = 1;
-                break;
-            }
-
-            // copy the contents of this packet.
-            memcpy(block+position_in_frame*expect_data_size, data_pointer, data_size);
-
-            --packets_left; // decrement packets remaining counter
         }
 
+        uint64_t expected_frame_counter = frame_counter + frame_increment;
+        data_pointer = decode_roach2_spead_packet(packet_buffer, &data_size, &frame_counter, &band_select);
+        assert(band_select==0);
+        assert(data_size==expect_data_size);
 
+        // multilog(log,LOG_DEBUG," >> %"PRIu64" > %"PRIu64" >> %"PRIu64"\n",packets_to_read,packets_read,frame_counter);
 
-
-
-        if (ipcio_close_block_write (hdu->data_block, dada_block_size) < 0)
-        {
-            multilog (log, LOG_ERR, "ipcio_close_block_write failed\n");
-            return EXIT_FAILURE;
+        // Logic to decide if the packet is what we wanted or if we need to do something else.
+        if (frame_counter > expected_frame_counter) {
+            dropped_packets += (frame_counter - expected_frame_counter ) /frame_increment;
+            //multilog(log,LOG_DEBUG," >> %"PRIu64" > %"PRIu64" >> %"PRIu64" packets_read=%"PRIu64"\n",frame_counter,frame_counter-expected_frame_counter,frame_increment,packets_read);
+            for (uint64_t i = expected_frame_counter; i < frame_counter; i+=frame_increment) {
+                // write some fake data packets where they were dropped.
+                ipcio_write (hdu->data_block, packet_buffer, data_size);
+            }
+            packets_read += (frame_counter - expected_frame_counter ) /frame_increment;
         }
-        --blocks_left_to_be_read; // decrement blocks remaining counter
-        block_start_frame_counter += frame_increment_per_block; // where we think the next block should start in the frame count.
+        if (frame_counter < expected_frame_counter) {
+            multilog(log,LOG_WARNING,"out of sequence frame counter %"PRIu64" expected %"PRIu64"\n",frame_counter,expected_frame_counter);
+            continue;
+        }
+
+        // copy the contents of this packet.
+        ipcio_write (hdu->data_block, data_pointer, data_size);
+        ++packets_read; // decrement packets remaining counter
+
     }
+
+    gettimeofday(&end_time, NULL);
+
+    double runtime = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_usec - start_time.tv_usec)/1e6;
+    multilog(log,LOG_INFO,"Finished. Sent %"PRIu64" packets in %lf s. Total packets dropped: %"PRIu64", %lf%%\n",packets_read,runtime,dropped_packets,100.0*(double)dropped_packets/(double)packets_read);
+
+
+    
+
 
     // Part 4. Some cleanup when we are finished.
     //
