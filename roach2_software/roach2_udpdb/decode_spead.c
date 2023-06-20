@@ -37,7 +37,7 @@
  *     8/200/512/128, 10/150/513/171, 12/100/512/256, 14/50/512/512*
  *
  */
-char const* decode_roach2_spead_packet(unsigned char const* heap, uint64_t* data_size, uint64_t* frame_counter, uint64_t* band_select) {
+char* decode_roach2_spead_packet(unsigned char* heap, uint64_t* data_size, uint64_t* frame_counter, uint64_t* band_select) {
 
     const uint8_t magic = heap[0];
 
@@ -102,7 +102,7 @@ char const* decode_roach2_spead_packet(unsigned char const* heap, uint64_t* data
     assert(data_offset==0);
 
     // the data starts after the header, and after the item pointers, plus whatever offset is specified (probably zero).
-    char const* data_pointer = heap + 8 + number_of_items*item_width + data_offset;
+    char* data_pointer = heap + 8 + number_of_items*item_width + data_offset;
 
 
     return data_pointer;

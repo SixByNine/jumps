@@ -18,8 +18,5 @@ roach2_udpstats: roach2_udpstats.o decode_spead.o
 	$(CC) -o roach2_udpstats roach2_udpstats.o decode_spead.o $(LFLAGS)
 
 
-roach2_udpdb_blockwise: roach2_udpdb_blockwise.o decode_spead.o
-	$(CC) -o roach2_udpdb_blockwise roach2_udpdb_blockwise.o decode_spead.o $(LFLAGS)
-
 clean:
 	rm *.o
