@@ -17,6 +17,10 @@
  * happens exactly on the 1PPS. It will then set the start time in the header to the nearest
  * UTC second.
  *
+ *
+ * To avoid packet drops, make sure to set
+ * sysctl -w net.core.rmem_max=26214400
+ *
  */
 
 
