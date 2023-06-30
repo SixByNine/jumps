@@ -46,7 +46,6 @@ char* decode_roach2_spead_packet(unsigned char* heap, uint64_t* data_size, uint6
         return 0;
     }
 
-
     const unsigned item_width = 8; // we could read this from the SPEAD header as the sum of bytes 3 and 4, but it is constant.
     const unsigned number_of_items = (uint64_t)heap[7] | ((uint64_t)heap[6] << 8); // number of items in heap, 16 bit value, bytes 6 and 7.
 
@@ -103,7 +102,6 @@ char* decode_roach2_spead_packet(unsigned char* heap, uint64_t* data_size, uint6
 
     // the data starts after the header, and after the item pointers, plus whatever offset is specified (probably zero).
     char* data_pointer = heap + 8 + number_of_items*item_width + data_offset;
-
 
     return data_pointer;
 }

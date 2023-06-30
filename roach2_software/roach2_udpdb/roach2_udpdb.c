@@ -36,6 +36,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <assert.h>
+#include <fcntl.h>
 
 // threading
 #include <pthread.h>
@@ -59,6 +60,8 @@
 
 
 
+#define MAX(a,b) (((a)>(b))?(a):(b))
+
 
 #define STRLEN 1024
 #define DADA_TIMESTR "%Y-%m-%d-%H:%M:%S"
@@ -68,19 +71,32 @@
 // number of packets in the internal buffer.
 #define NUM_PACKET_BUFFERS 16000
 
-typedef struct socket_thread_context_t {
+typedef struct local_context_t {
     multilog_t* log; // psrdada thread-safe logger
     char ip_address[128]; // local IP address to listen on
     int portnum; // port to listen on
     int socket_listen_cpu_core; // CPU core on which to listen for packets.
-    atomic_int buffer_write_position; // number of packets recieved.
-    int buffer_read_position; // number of packets read.
+    atomic_int_fast64_t buffer_write_position; // number of packets recieved.
+    int_fast64_t buffer_read_position; // number of packets read.
     int number_of_overruns; // times that we have overrun the internal buffer
     unsigned char* buffer; // the internal buffer will be length PACKET_BUFFER_SIZE*NUM_PACKET_BUFFERS
-} socket_thread_context_t;
+
+    // monitor variables
+    int64_t packet_count; int64_t dropped_packets;
+    int64_t block_count; int64_t packets_to_read; double seconds_per_packet;
+    int64_t buffer_lag; int64_t max_buffer_lag; int64_t recent_buffer_lag;
+} local_context_t;
 
 void *socket_receive_thread(void* thread_context);
-unsigned char* get_next_packet_buffer(socket_thread_context_t* socket_thread_context);
+unsigned char* get_next_packet_buffer(local_context_t* local_context);
+unsigned char* get_random_packet_buffer(local_context_t* local_context);
+
+
+char* monitor_string; // Global seems the best way :(
+void monitor(int monitor_fd, char* state,local_context_t* context);
+
+int band_select_to_frames_per_heap(uint64_t band_select);
+int band_select_to_data_size(uint64_t band_select);
 
 //******
 //
@@ -105,6 +121,9 @@ int main (int argc, char **argv)
     // control parameters
     char force_start_without_1pps = 0;
     double requested_integration_time=300.0; // seconds.
+    char* control_fifo = NULL;
+    char* monitor_fifo = NULL;
+    monitor_string = malloc(STRLEN); // allocate memory for the monitor string
 
     // for parsing arguments
     char arg;
@@ -120,20 +139,28 @@ int main (int argc, char **argv)
     multilog(log,LOG_DEBUG,"Debug verbosity\n");
 
     // set up the context for the socket thread. this actually stores a bunch of useful state information.
-    socket_thread_context_t* socket_thread_context = malloc(sizeof(socket_thread_context_t));
-    memset(socket_thread_context,0,sizeof(socket_thread_context_t)); // initialise to zero.
+    local_context_t* local_context = malloc(sizeof(local_context_t));
+    memset(local_context,0,sizeof(local_context_t)); // initialise to zero.
     // allocate the internal ring buffer.
-    socket_thread_context->buffer = malloc(PACKET_BUFFER_SIZE*NUM_PACKET_BUFFERS);
-    socket_thread_context->log = log;
+    local_context->buffer = malloc(PACKET_BUFFER_SIZE*NUM_PACKET_BUFFERS);
+    local_context->log = log;
 
     // set a default value
-    strncpy(socket_thread_context->ip_address,"10.0.3.1",128);
+    strncpy(local_context->ip_address,"10.0.3.1",128);
 
 
-    while ((arg = getopt(argc, argv, "c:i:k:p:FH:I:T:")) != -1) {
+    while ((arg = getopt(argc, argv, "c:i:k:p:C:FH:I:M:T:")) != -1) {
         switch (arg) {
             case 'c':
-                sscanf(optarg,"%d",&socket_thread_context->socket_listen_cpu_core);
+                sscanf(optarg,"%d",&local_context->socket_listen_cpu_core);
+                break;
+            case 'C':
+                control_fifo = malloc(strlen(optarg)+1);
+                strncpy(control_fifo, optarg,strlen(optarg)+1);
+                break;
+            case 'M':
+                monitor_fifo = malloc(strlen(optarg)+1);
+                strncpy(monitor_fifo, optarg,strlen(optarg)+1);
                 break;
             case 'T':
                 sscanf(optarg,"%lf",&requested_integration_time);
@@ -142,10 +169,10 @@ int main (int argc, char **argv)
                 strncpy(header_file,optarg,STRLEN);
                 break;
             case 'I':
-                strncpy(socket_thread_context->ip_address,optarg,128);
+                strncpy(local_context->ip_address,optarg,128);
                 break;
             case 'p':
-                sscanf(optarg,"%d",&socket_thread_context->portnum);
+                sscanf(optarg,"%d",&local_context->portnum);
                 break;
             case 'F':
                 force_start_without_1pps=1;
@@ -165,6 +192,21 @@ int main (int argc, char **argv)
 
 
     // Part 1. Initialise everything ...
+    // open monitor and control pipes
+
+    int monitor_fd=-1;
+    if (monitor_fifo!=NULL){
+        monitor_fd = open(monitor_fifo,O_NONBLOCK|O_WRONLY);
+        if (monitor_fd < 0){
+        multilog(log,LOG_ERR,"opening monitor pipe '%s' errno=%d %s\n",monitor_fifo,errno,strerror(errno));
+        }
+    }
+    int control_fd=-1;
+    if (control_fifo!=NULL){
+        control_fd = open(control_fifo,O_NONBLOCK|O_RDONLY);
+    }
+
+
 
     // set up the dada stuff...
 
@@ -209,18 +251,16 @@ int main (int argc, char **argv)
 
     // Part 1.1 start the socket rx thread...
     pthread_t socket_thread;
-    pthread_create(&socket_thread,NULL, socket_receive_thread, socket_thread_context);
+    pthread_create(&socket_thread,NULL, socket_receive_thread, local_context);
 
     // bind the socket rx thread to an appropriate core
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
-    CPU_SET(socket_thread_context->socket_listen_cpu_core, &cpuset);
+    CPU_SET(local_context->socket_listen_cpu_core, &cpuset);
     pthread_setaffinity_np(socket_thread, sizeof(cpuset), &cpuset);
 
 
     // Part 2. Wait for a frame counter reset to indicate synchronisation with 1PPS.
-    char waiting=1;
-    uint64_t wait_count=0; // this stores how many packets we have waited for.
 
     // variables to store the packet contents.
     uint64_t frame_counter=0;
@@ -228,43 +268,61 @@ int main (int argc, char **argv)
     uint64_t data_size=0;
     char* data_pointer=0;
     // this helps track lost packets...
-    uint64_t expect_frame_count=0;
+    uint64_t expected_frame_counter=0;
 
     multilog(log,LOG_INFO,"Waiting for frame counter reset...\n");
-    while (waiting) {
+    while (1) {
         // read from buffer
-
-        unsigned char* packet_buffer = get_next_packet_buffer(socket_thread_context);
+        unsigned char* packet_buffer = get_next_packet_buffer(local_context);
         data_pointer = decode_roach2_spead_packet(packet_buffer, &data_size, &frame_counter, &band_select);
-
-        if (expect_frame_count == 0 ) expect_frame_count = frame_counter;
-        else {
-            expect_frame_count += 64;
+        if(data_pointer==0){
+            multilog(log,LOG_WARNING,"Invalid packet recieved\n");
+            continue;
         }
-        
-        if (frame_counter==0) { 
+
+        uint64_t frame_increment = band_select_to_frames_per_heap(band_select);
+
+        if (frame_counter==0) {
+            // this is what we were waiting for! break out of this look and start working.
             break;
         }
 
-        if ((wait_count %100000) == 0 ){
-            int64_t lost_packets = ((int64_t)frame_counter-(int64_t)expect_frame_count)/64;
-            multilog(log,LOG_INFO,"Packets recieved: %07"PRIu64" (Rx %d Rd %d) Last frame counter: %012"PRIu64" Expected %012"PRIu64" Lost packets = %"PRIi64" (%.4lf%%) overruns %u\n",
-                    wait_count,
-                    socket_thread_context->buffer_write_position,
-                    socket_thread_context->buffer_read_position,
-                    frame_counter,
-                    expect_frame_count,
-lost_packets,100*(double)lost_packets/(double)wait_count,
-                    socket_thread_context->number_of_overruns);
-            if(force_start_without_1pps && (wait_count > 100000)) {
+        if (expected_frame_counter == 0 ) expected_frame_counter = frame_counter;
+
+        if (frame_counter > expected_frame_counter) {
+            local_context->dropped_packets += (frame_counter - expected_frame_counter ) / frame_increment;
+        }
+
+        if ((local_context->packet_count %100000) == 0 ){
+            monitor(monitor_fd, "WAITING", local_context);
+            multilog(log,LOG_INFO,"Waiting for 1PPS. lag: % 3d max_lag: % 3d block_lag: % 3d overruns: %d packet_loss: %"PRId64"/%"PRId64" (%lg%%)\n",
+                    local_context->buffer_lag,
+                    local_context->max_buffer_lag, 
+                    local_context->recent_buffer_lag,
+                    local_context->number_of_overruns, 
+                    local_context->dropped_packets,
+                    local_context->packet_count,
+                    100.0*(double)(local_context->dropped_packets)/(double)(local_context->packet_count));
+            local_context->recent_buffer_lag = 0;
+
+            if(force_start_without_1pps && (local_context->packet_count > 100000)) {
                 // this allows us to force start without trigering for testing only.
                 multilog(log,LOG_WARNING,"STARTING WITHOUT WAITING FOR 1PPS!!!!\n");
                 break;
             }
         }
 
-        ++wait_count;
+        ++(local_context->packet_count); // increment packet counter
+        expected_frame_counter += frame_increment; // expect the next frame
+
     }
+
+    // reset appropriate counters...
+    local_context->max_buffer_lag    = 0;
+    local_context->recent_buffer_lag = 0;
+    local_context->number_of_overruns= 0;
+    local_context->dropped_packets   = 0;
+    local_context->packet_count    = 0;
 
     // part 2.2 - set the start time and write the header to the dada buffer
     // We should have just started at the current UTC second.
@@ -291,99 +349,129 @@ lost_packets,100*(double)lost_packets/(double)wait_count,
     multilog (log, LOG_INFO, "UTC_START %s written to header\n", utc_start);
 
 
+
+    const uint_fast32_t frame_increment = band_select_to_frames_per_heap(band_select);
+    const uint64_t expected_data_size     = band_select_to_data_size(band_select);
+    const uint64_t packets_per_block = dada_block_size/expected_data_size;
+    double seconds_per_frame = 0.0625e-6; // 0.0625 microseconds.
+    local_context->seconds_per_packet = seconds_per_frame*frame_increment;
+
+    multilog(log, LOG_INFO, "BandSel %"PRIu64", Packet data size = %"PRIu64", dada block size = %"PRIu64"\n",band_select,data_size, dada_block_size);
+
+    if (data_size != expected_data_size) {
+        multilog (log, LOG_ERR, "packet data size does not match expected data size %"PRIu64"%!="PRIu64"\n",data_size,expected_data_size);
+        return EXIT_FAILURE;
+    }
+
+    if (dada_block_size % expected_data_size ) {
+        multilog(log,LOG_ERR,"Require integer number of packets per block, but %"PRIu64"%"PRIu64"!=0.\n",dada_block_size,expected_data_size);
+        return EXIT_FAILURE;
+    }
+
+    // @TODO: set frequency parameters in header
+
+
+// ....
+// ....
+// ....
+// ....
+
+
     // End of header writing. Mark header closed.
     if (ipcbuf_mark_filled (hdu->header_block, header_size) < 0)  {
         multilog (log, LOG_ERR, "Could not mark filled header block\n");
         return EXIT_FAILURE;
     }
 
-    multilog(log, LOG_INFO, "BandSel %"PRIu64", Packet data size = %"PRIu64", dada block size = %"PRIu64"\n",band_select,data_size, dada_block_size);
-
-    if (dada_block_size % data_size ) {
-        multilog(log,LOG_ERR,"Require integer number of packets per block, but %"PRIu64"%"PRIu64"!=0.\n",dada_block_size,data_size);
-        return EXIT_FAILURE;
-    }
-    const uint64_t packets_per_block = dada_block_size/data_size;
 
     multilog(log, LOG_INFO, "packets_per_block %"PRIu64"\n",packets_per_block);
 
-    if (band_select!=0) {
-        // @TODO: determinine if we ever will need to run with a narrower band. 
-        // Band_select=0 is the full 512MHz band.
-        multilog(log,LOG_ERR,"Require band_select=0. Is set to %"PRIu64".\n");
-        return EXIT_FAILURE;
-    }
-
-    // write the first data packet
-    ipcio_write (hdu->data_block, data_pointer, data_size);
-
-    const uint_fast32_t frame_increment = 64; // This is only true for band_select=0
-    const uint64_t expect_data_size=4096; // This is true only for band_select=0
-
-    double seconds_per_frame = 0.0625e-6; // 0.0625 microseconds.
-
-    uint64_t block_start_frame_counter = frame_counter;
-
-
-    uint_fast8_t holdover_packet = 1; // Set to 1 to ensure the frame=0 packet is written to the buffer
 
     // Part 3. Capture some data!
-    //
-    char* empty_data_pointer = malloc(expect_data_size);
-    // @TODO: Decide what to use for empty packets. Here we copy the first packet, though this seems bad.
-    memcpy(empty_data_pointer,data_pointer,data_size);
 
     // Not sure if there is any need to read integer number of blocks, but I guess it doesn't make much difference.
-    uint64_t dropped_packets=0;
     uint64_t blocks_to_read = (requested_integration_time / seconds_per_frame)/frame_increment/packets_per_block+1;
-    uint64_t packets_to_read = blocks_to_read*packets_per_block;
-    uint64_t packets_read = 1;
+    local_context->packets_to_read = blocks_to_read*packets_per_block;
     uint64_t nextblock = packets_per_block;
 
-    multilog(log,LOG_INFO,"Packets to read %"PRIu64"\n",packets_to_read);
 
-    while (packets_read < packets_to_read) {
+    // write the first data packet to the dada buffer.
+    ipcio_write (hdu->data_block, data_pointer, data_size);
 
-        if (packets_read > nextblock) {
-            multilog(log,LOG_INFO,"New block.  (Rx-Rd %d Overruns:%d) Dropped Packets so far  %"PRIu64"/%"PRIu64" %lf%%\n",socket_thread_context->buffer_write_position-socket_thread_context->buffer_read_position, socket_thread_context->number_of_overruns, dropped_packets,packets_read,100.0*(double)dropped_packets/(double)packets_read);
+    // set up for the next frame.
+    expected_frame_counter = frame_counter + frame_increment;
+    local_context->packet_count = 1;
 
+    multilog(log,LOG_INFO,"Packets to read %"PRIu64"\n",local_context->packets_to_read);
+
+    while (local_context->packet_count < local_context->packets_to_read) {
+
+        if (local_context->packet_count > nextblock) {
+            monitor(monitor_fd, "RUNNING", local_context);
+            multilog(log,LOG_INFO,"New block. lag: % 3d max_lag: % 3d block_lag: % 3d overruns: %d packet_loss: %"PRId64"/%"PRId64" (%lg%%)\n",
+                    local_context->buffer_lag,
+                    local_context->max_buffer_lag, 
+                    local_context->recent_buffer_lag,
+                    local_context->number_of_overruns, 
+                    local_context->dropped_packets,
+                    local_context->packet_count,
+                    100.0*(double)(local_context->dropped_packets)/(double)(local_context->packet_count));
+            local_context->recent_buffer_lag = 0;
             nextblock += packets_per_block;
         }
 
         // get next packet
-        unsigned char* packet_buffer = get_next_packet_buffer(socket_thread_context);
-        uint64_t expected_frame_counter = frame_counter + frame_increment;
+        unsigned char* packet_buffer = get_next_packet_buffer(local_context);
         data_pointer = decode_roach2_spead_packet(packet_buffer, &data_size, &frame_counter, &band_select);
-        assert(band_select==0);
-        assert(data_size==expect_data_size);
+        if(data_pointer==0){
+            multilog(log,LOG_WARNING,"Invalid packet recieved\n");
+            continue;
+        }
 
-        // multilog(log,LOG_DEBUG," >> %"PRIu64" > %"PRIu64" >> %"PRIu64"\n",packets_to_read,packets_read,frame_counter);
+        assert(band_select==0);
+        assert(data_size==expected_data_size);
+
+        // multilog(log,LOG_DEBUG," >> %"PRIu64" > %"PRIu64" >> %"PRIu64"\n",packets_to_read,local_context->packet_count,frame_counter);
 
         // Logic to decide if the packet is what we wanted or if we need to do something else.
         if (frame_counter > expected_frame_counter) {
-            dropped_packets += (frame_counter - expected_frame_counter ) /frame_increment;
-            //multilog(log,LOG_DEBUG," >> %"PRIu64" > %"PRIu64" >> %"PRIu64" packets_read=%"PRIu64"\n",frame_counter,frame_counter-expected_frame_counter,frame_increment,packets_read);
+            local_context->dropped_packets += (frame_counter - expected_frame_counter ) / frame_increment;
             for (uint64_t i = expected_frame_counter; i < frame_counter; i+=frame_increment) {
                 // write some fake data packets where they were dropped.
-                ipcio_write (hdu->data_block, packet_buffer, data_size);
+                // we grab a random packet from the buffer to use as data.
+                // be careful not to overwrite any important variables for the actual packet we are working on!
+                unsigned char* junk_packet_buffer = get_random_packet_buffer(local_context);
+                uint64_t junk_data_size,junk_frame_counter,junk_band_select;
+                char* junk_data_pointer = decode_roach2_spead_packet(junk_packet_buffer, &junk_data_size, &junk_frame_counter, &junk_band_select);
+                assert(data_size==expected_data_size);
+                ipcio_write (hdu->data_block, junk_data_pointer, junk_data_size);
             }
-            packets_read += (frame_counter - expected_frame_counter ) /frame_increment;
+            local_context->packet_count += (frame_counter - expected_frame_counter ) /frame_increment;
         }
         if (frame_counter < expected_frame_counter) {
-            multilog(log,LOG_WARNING,"out of sequence frame counter %"PRIu64" expected %"PRIu64"\n",frame_counter,expected_frame_counter);
-            continue;
+            
+            // @TODO: How do we actually handle out of sequence packets?
+            if (frame_counter == 0){
+                // we must have re-set the frame counter.
+                multilog(log,LOG_ERR,"Unexpected frame counter reset. Timing integrity lost. Aborting observation");
+                break;
+            } else {
+                multilog(log,LOG_WARNING,"Discarding out of sequence packet. frame counter %"PRIu64" expected %"PRIu64"\n",frame_counter,expected_frame_counter);
+                continue;
+            }
         }
 
         // copy the contents of this packet.
         ipcio_write (hdu->data_block, data_pointer, data_size);
-        ++packets_read; // decrement packets remaining counter
+        ++(local_context->packet_count); // increment packet counter
+        expected_frame_counter += frame_increment; // expect the next frame
 
     }
 
     gettimeofday(&end_time, NULL);
 
     double runtime = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_usec - start_time.tv_usec)/1e6;
-    multilog(log,LOG_INFO,"Finished. Sent %"PRIu64" packets in %lf s. Total packets dropped: %"PRIu64", %lf%%\n",packets_read,runtime,dropped_packets,100.0*(double)dropped_packets/(double)packets_read);
+    multilog(log,LOG_INFO,"Finished. Sent %"PRIu64" packets in %lf s. Total packets dropped: %"PRIu64", %lf%%\n",local_context->packet_count,runtime,local_context->dropped_packets,100.0*(double)local_context->dropped_packets/(double)local_context->packet_count);
 
     // Part 4. Some cleanup when we are finished.
     //
@@ -403,6 +491,8 @@ lost_packets,100*(double)lost_packets/(double)wait_count,
     free(header_file);
     free(obsid);
 
+    free(monitor_string);
+
     return EXIT_SUCCESS;
 }
 
@@ -410,7 +500,7 @@ lost_packets,100*(double)lost_packets/(double)wait_count,
 
 #define VLEN 16
 void *socket_receive_thread(void* thread_context){
-    socket_thread_context_t* context = (socket_thread_context_t*)thread_context;
+    local_context_t* context = (local_context_t*)thread_context;
     multilog_t* log = context->log;
     struct timeval tv;
 
@@ -485,27 +575,83 @@ void *socket_receive_thread(void* thread_context){
         ++(context->buffer_write_position);
     }
 
+
     return NULL;
 
 }
 
 
-unsigned char* get_next_packet_buffer(socket_thread_context_t* socket_thread_context){
-    while (socket_thread_context->buffer_read_position >= socket_thread_context->buffer_write_position) {
+unsigned char* get_next_packet_buffer(local_context_t* local_context){
+    while (local_context->buffer_read_position >= local_context->buffer_write_position) {
         usleep(4); // wait 4 microseconds for a new packet.
     }
 
-    int overrun = ((socket_thread_context->buffer_write_position)-(socket_thread_context->buffer_read_position))/NUM_PACKET_BUFFERS;
-    if (overrun) {
-        multilog(socket_thread_context->log,LOG_WARNING,"OVERRUN!!! %d - %d = %d\n",socket_thread_context->buffer_write_position,socket_thread_context->buffer_read_position,(socket_thread_context->buffer_write_position)-(socket_thread_context->buffer_read_position));
-    }
-    socket_thread_context->buffer_read_position += overrun * NUM_PACKET_BUFFERS;
-    socket_thread_context->number_of_overruns += overrun;
+    // monitoring stuff to check max buffer lag
+    local_context->buffer_lag = (local_context->buffer_write_position)-(local_context->buffer_read_position);
+    local_context->max_buffer_lag = MAX(local_context->buffer_lag,local_context->max_buffer_lag); // MAX macro
+    local_context->recent_buffer_lag = MAX(local_context->buffer_lag,local_context->recent_buffer_lag);
 
-    unsigned char* packet_buffer = socket_thread_context->buffer + (socket_thread_context->buffer_read_position%NUM_PACKET_BUFFERS)*PACKET_BUFFER_SIZE;
-    ++(socket_thread_context->buffer_read_position);
+    int overrun = local_context->buffer_lag/NUM_PACKET_BUFFERS;
+
+    if (overrun) {
+        multilog(local_context->log,LOG_WARNING,"OVERRUN!!! %"PRIdFAST64" - %"PRIdFAST64" = %d\n",local_context->buffer_write_position,local_context->buffer_read_position,(local_context->buffer_write_position)-(local_context->buffer_read_position));
+    }
+
+    local_context->buffer_read_position += overrun * NUM_PACKET_BUFFERS;
+    local_context->number_of_overruns += overrun;
+
+    unsigned char* packet_buffer = local_context->buffer + (local_context->buffer_read_position%NUM_PACKET_BUFFERS)*PACKET_BUFFER_SIZE;
+    ++(local_context->buffer_read_position);
     return packet_buffer;
 }
 
 
+unsigned char* get_random_packet_buffer(local_context_t* local_context){
+    int64_t random_bufpos = rand()%NUM_PACKET_BUFFERS;
+    unsigned char* packet_buffer = local_context->buffer + random_bufpos*PACKET_BUFFER_SIZE;
+    return packet_buffer;
+}
 
+
+void monitor(int monitor_fd, char* state, local_context_t* context){
+    if (monitor_fd > 0) {
+// fill string
+        snprintf(monitor_string, STRLEN, "%s %"PRId64" %"PRId64" %"PRId64" %"PRId64" %lf %"PRId64" %"PRId64" %"PRId64"\n",
+                state,
+                context->packet_count, context->dropped_packets,
+                context->block_count,context->packets_to_read, context->seconds_per_packet,
+                context->buffer_lag, context->max_buffer_lag, context->recent_buffer_lag);
+        monitor_string[STRLEN-1]='\0';
+// write string
+        write(monitor_fd,monitor_string,strlen(monitor_string));
+    }
+}
+
+
+int band_select_to_frames_per_heap(uint64_t band_select) {
+//https://drive.google.com/file/d/1Dcp3hzQ37FaQsrmJCuuU-ry1TO9biQ90/view?usp=sharing
+    switch (band_select){
+        case 0:
+            return 64;
+        case 2:
+            return 74;
+        case 4:
+            return 86;
+        case 6:
+            return 103;
+        case 8:
+            return 128;
+        case 10:
+            return 171;
+        case 12:
+            return 256;
+        case 14:
+            return 512;
+        default:
+            return -1;
+    }
+}
+int band_select_to_data_size(uint64_t band_select) {
+    int words_per_frame = 8-band_select/2;
+    return band_select_to_frames_per_heap(band_select) * words_per_frame*8; // 
+}
