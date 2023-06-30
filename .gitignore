@@ -1,3 +1,7 @@
+# Our C binaries
+roach2_software/roach2_udpdb/roach2_udpstats
+roach2_software/roach2_udpdb/roach2_udpdb
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

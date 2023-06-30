@@ -1,0 +1,12 @@
+{
+    "dspsr_config": {
+        "run": true,
+        "nbins":1024,
+        "nchan":32,
+        "coherent_dedisp": true,
+        "dspsr_cuda_streams": [0],
+        "dspsr_base_options":[]
+    }
+    "extra_modes": {
+    }
+}
