@@ -6,7 +6,12 @@
         "coherent_dedisp": true,
         "dspsr_cuda_streams": [0],
         "dspsr_base_options":[]
-    }
+    },
+    "observing_config": {
+        "centre_freq": 1532.0,
+        "bandwidth": -512.0,
+        "band_select": 2
+    },
     "extra_modes": {
     }
 }

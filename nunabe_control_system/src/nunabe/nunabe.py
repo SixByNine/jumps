@@ -33,6 +33,8 @@ class NunaBackend(SubComponent):
         self.telescopeinterface = subcomponents.TelescopeInterface(self)
         self.userinterface = subcomponents.UserInterface(self)
 
+        self.cpu_map={}
+
 
     def initial_state(self):
         return {'status':'Initialising'}
@@ -48,7 +50,9 @@ class NunaBackend(SubComponent):
         self.log.info("Subcomponents Started")
 
     def loop(self):
+        # Do stuff!
         pass
+
 
     def stop(self):
         self.log.debug("Stop UserInterface")

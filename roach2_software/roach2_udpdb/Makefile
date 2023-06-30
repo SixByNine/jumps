@@ -11,7 +11,10 @@ CC = gcc
 
 all: roach2_udpdb roach2_udpstats
 
-roach2_udpdb: roach2_udpdb.o decode_spead.o
+default_header.h: default_header.ascii
+    xxd -i default_header.ascii > default_header.h
+
+roach2_udpdb: roach2_udpdb.o decode_spead.o default_header.h
 	$(CC) -o roach2_udpdb roach2_udpdb.o decode_spead.o $(LFLAGS)
 
 roach2_udpstats: roach2_udpstats.o decode_spead.o

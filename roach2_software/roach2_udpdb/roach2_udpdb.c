@@ -28,6 +28,7 @@
 #define _GNU_SOURCE
 
 #include "decode_spead.h"
+#include "default_header.h"
 
 // standard libraries
 #include <stdlib.h>
@@ -113,11 +114,17 @@ int main (int argc, char **argv)
     key_t dada_key = DADA_DEFAULT_BLOCK_KEY;
 
     // header parameter stuff
-    char* header_file = malloc(STRLEN);
-    char* obsid = malloc(STRLEN);
+    char* header_file = 0;
+    char* source_name = malloc(STRLEN);
+    char* telescope_id = malloc(STRLEN);
+    char* receiver_name = malloc(STRLEN);
+    char* receiver_basis = malloc(STRLEN);
     char* utc_start = malloc(STRLEN);
-
-
+    double centre_frequency = 1532.0; // this is wrong, but will be updated later
+    double bandwidth = -256.0;
+    strncpy(receiver_basis,"Circular",STRLEN)
+    strncpy(receiver_name,"Unknown",STRLEN)
+    strncpy(telescope_id,"",STRLEN)
     // control parameters
     char force_start_without_1pps = 0;
     double requested_integration_time=300.0; // seconds.
@@ -149,10 +156,27 @@ int main (int argc, char **argv)
     strncpy(local_context->ip_address,"10.0.3.1",128);
 
 
-    while ((arg = getopt(argc, argv, "c:i:k:p:C:FH:I:M:T:")) != -1) {
+    while ((arg = getopt(argc, argv, "b:c:f:i:k:lp:r:s:t:C:FH:I:M:T:")) != -1) {
         switch (arg) {
+            case 'f': // centre frequency
+                sscanf(optarg,"%lf",&centre_frequency);
+                break
+                case 'b': // bandwidth
+                sscanf(optarg,"%lf",&bandwidth);
             case 'c':
                 sscanf(optarg,"%d",&local_context->socket_listen_cpu_core);
+                break;
+            case 't':
+                strncpy(telescope_id,optarg,STRLEN);
+                break;
+            case 's':
+                strncpy(source_name,optarg,STRLEN);
+                break;
+            case 'r':
+                strncpy(receiver_name,optarg,STRLEN);
+                break;
+            case 'l':
+                strncpy(receiver_basis,"Linear",STRLEN);
                 break;
             case 'C':
                 control_fifo = malloc(strlen(optarg)+1);
@@ -166,7 +190,8 @@ int main (int argc, char **argv)
                 sscanf(optarg,"%lf",&requested_integration_time);
                 break;
             case 'H':
-                strncpy(header_file,optarg,STRLEN);
+                header_file=malloc(strlen(optarg)+1)
+                memcpy(header_file,optarg,strlen(optarg)+1)
                 break;
             case 'I':
                 strncpy(local_context->ip_address,optarg,128);
@@ -176,9 +201,6 @@ int main (int argc, char **argv)
                 break;
             case 'F':
                 force_start_without_1pps=1;
-                break;
-            case 'i':
-                strncpy(obsid,optarg,STRLEN);
                 break;
             case 'k':
                 if (sscanf (optarg, "%x", &dada_key) != 1)
@@ -243,11 +265,45 @@ int main (int argc, char **argv)
     // Get the next header block to write to.
     char* header_buf = ipcbuf_get_next_write (hdu->header_block);
 
+    if (header_file != 0) {}
     // read the header parameters from the file.
     if (fileread (header_file, header_buf, header_size) < 0)  {
         multilog (log, LOG_ERR, "Could not read header from %s\n", header_file);
         return EXIT_FAILURE;
     }
+    } else {
+    // use hardcoded default file
+        if (default_header_ascii_len > header_size){
+            multilog (log, LOG_ERR, "Header block size too small for default header parameters! %d bytes < %d bytes\n", header_size,default_header_ascii_len);
+            return EXIT_FAILURE;
+        }
+        memset(header_buf,0,header_size);
+        memcpy(header_buf,default_header_ascii,default_header_ascii_len);
+    }
+
+    if (ascii_header_set (header_buf, "FREQ", "%.8lf", centre_frequency) < 0) {
+        multilog (log, LOG_ERR, "failed ascii_header_set FREQ\n");
+        return EXIT_FAILURE;
+    }
+
+    if (ascii_header_set (header_buf, "BW", "%.8lf", bandwidth) < 0) {
+        multilog (log, LOG_ERR, "failed ascii_header_set BW\n");
+        return EXIT_FAILURE;
+    }
+    if (ascii_header_set (header_buf, "SOURCE", "%s", source_name) < 0) {
+        multilog (log, LOG_ERR, "failed ascii_header_set SOURCE\n");
+        return EXIT_FAILURE;
+    }
+    if (ascii_header_set (header_buf, "RECEIVER", "%s", receiver_name) < 0) {
+        multilog (log, LOG_ERR, "failed ascii_header_set RECEIVER\n");
+        return EXIT_FAILURE;
+    }
+
+    if (ascii_header_set (header_buf, "BASIS", "%s", receiver_basis) < 0) {
+        multilog (log, LOG_ERR, "failed ascii_header_set BASIS\n");
+        return EXIT_FAILURE;
+    }
+
 
     // Part 1.1 start the socket rx thread...
     pthread_t socket_thread;
@@ -487,10 +543,14 @@ int main (int argc, char **argv)
     }
 
     // free local memory
+    free(source_name);
+    free(telescope_id);
+    free(receiver_name);
+    free(receiver_basis);
     free(utc_start);
-    free(header_file);
-    free(obsid);
-
+    if (header_file != 0) {
+        free(header_file);
+    }
     free(monitor_string);
 
     return EXIT_SUCCESS;
