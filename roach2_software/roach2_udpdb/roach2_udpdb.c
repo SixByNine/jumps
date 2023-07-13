@@ -160,9 +160,10 @@ int main (int argc, char **argv)
         switch (arg) {
             case 'f': // centre frequency
                 sscanf(optarg,"%lf",&centre_frequency);
-                break
-                case 'b': // bandwidth
+                break;
+            case 'b': // bandwidth
                 sscanf(optarg,"%lf",&bandwidth);
+                break;
             case 'c':
                 sscanf(optarg,"%d",&local_context->socket_listen_cpu_core);
                 break;

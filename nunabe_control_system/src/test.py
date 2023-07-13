@@ -1,10 +1,27 @@
 #!/usr/bin/env python
 import nunabe
 import time
+import sys
 
 be = nunabe.NunaBackend()
-be.debug()
+
 be.start()
+#be.debug()
+
+be.digitiser_interface.reprogram(band_select=0,dont_actually_program=True)
+be.digitiser_interface.execute_queue()
+
+print(be.digitiser_interface.get_cpu_map({}))
+
+be.start_observation("test",40)
+
+time.sleep(50)
+
+be.stop()
+be.join()
+
+sys.exit()
+
 be.ringbuffer.create_buffer("test",key="8888")
 time.sleep(1)
 

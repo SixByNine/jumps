@@ -26,7 +26,16 @@ class Ringbuffer(SubComponent):
         if label in self.states:
             self.log.warning(f"Ringbuffer {label} already exists, ignoring...")
             return
-        cmd = [str(i) for i in ['dada_db', '-k', key, '-b', bufsz, '-a', hdrsz, '-n', nbufs]]
+        # Just kill any existing buffer just in case...
+        cmd = ['dada_db', '-k', key, '-d']
+        try:
+            self.log.info("Flushing out any existing buffer at this key")
+            self.log.info("! " + " ".join(cmd))
+            subprocess.run(cmd,timeout=0.1)
+        except:
+            pass
+
+        cmd = [str(i) for i in ['dada_db', '-k', key, '-b', bufsz, '-a', hdrsz, '-n', nbufs, '-l']]
         self.keys[label] = key
         self.states[label] = newstate(key)
         try:
@@ -51,6 +60,10 @@ class Ringbuffer(SubComponent):
     @subcomponentmethod
     def destroy_buffer(self, label):
         self.log.info(f"destroy ringbuffer {label}")
+        if label not in self.states:
+            self.log.warning(f"Ringbuffer {label} does not exist yet, ignoring...")
+            return
+
         key = self.keys[label]
         self.states[label]['hdrsz'] = 0
         self.states[label]['nbufs'] = 0

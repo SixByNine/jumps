@@ -35,7 +35,7 @@ class Monitor(SubComponent):
             try:
                 record = self.backend.logqueue.get(block=0)
                 ## handle the records for the UI output.
-                print(record) ## << Not this!
+                #print(record) ## << Not this!
             except queue.Empty:
                 break
 
