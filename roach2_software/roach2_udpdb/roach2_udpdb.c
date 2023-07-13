@@ -122,9 +122,9 @@ int main (int argc, char **argv)
     char* utc_start = malloc(STRLEN);
     double centre_frequency = 1532.0; // this is wrong, but will be updated later
     double bandwidth = -256.0;
-    strncpy(receiver_basis,"Circular",STRLEN)
-    strncpy(receiver_name,"Unknown",STRLEN)
-    strncpy(telescope_id,"",STRLEN)
+    strncpy(receiver_basis,"Circular",STRLEN);
+    strncpy(receiver_name,"Unknown",STRLEN);
+    strncpy(telescope_id,"",STRLEN);
     // control parameters
     char force_start_without_1pps = 0;
     double requested_integration_time=300.0; // seconds.
@@ -191,8 +191,8 @@ int main (int argc, char **argv)
                 sscanf(optarg,"%lf",&requested_integration_time);
                 break;
             case 'H':
-                header_file=malloc(strlen(optarg)+1)
-                memcpy(header_file,optarg,strlen(optarg)+1)
+                header_file=malloc(strlen(optarg)+1);
+                memcpy(header_file,optarg,strlen(optarg)+1);
                 break;
             case 'I':
                 strncpy(local_context->ip_address,optarg,128);
@@ -227,6 +227,10 @@ int main (int argc, char **argv)
     int control_fd=-1;
     if (control_fifo!=NULL){
         control_fd = open(control_fifo,O_NONBLOCK|O_RDONLY);
+        if (control_fd < 0){
+            multilog(log,LOG_ERR,"opening control pipe '%s' errno=%d %s\n",control_fifo,errno,strerror(errno));
+        }
+
     }
 
 
@@ -266,14 +270,14 @@ int main (int argc, char **argv)
     // Get the next header block to write to.
     char* header_buf = ipcbuf_get_next_write (hdu->header_block);
 
-    if (header_file != 0) {}
-    // read the header parameters from the file.
-    if (fileread (header_file, header_buf, header_size) < 0)  {
-        multilog (log, LOG_ERR, "Could not read header from %s\n", header_file);
-        return EXIT_FAILURE;
-    }
+    if (header_file != 0) {
+        // read the header parameters from the file.
+        if (fileread (header_file, header_buf, header_size) < 0)  {
+            multilog (log, LOG_ERR, "Could not read header from %s\n", header_file);
+            return EXIT_FAILURE;
+        }
     } else {
-    // use hardcoded default file
+        // use hardcoded default file
         if (default_header_ascii_len > header_size){
             multilog (log, LOG_ERR, "Header block size too small for default header parameters! %d bytes < %d bytes\n", header_size,default_header_ascii_len);
             return EXIT_FAILURE;
@@ -428,10 +432,10 @@ int main (int argc, char **argv)
     // @TODO: set frequency parameters in header
 
 
-// ....
-// ....
-// ....
-// ....
+    // ....
+    // ....
+    // ....
+    // ....
 
 
     // End of header writing. Mark header closed.
@@ -506,7 +510,7 @@ int main (int argc, char **argv)
             local_context->packet_count += (frame_counter - expected_frame_counter ) /frame_increment;
         }
         if (frame_counter < expected_frame_counter) {
-            
+
             // @TODO: How do we actually handle out of sequence packets?
             if (frame_counter == 0){
                 // we must have re-set the frame counter.
@@ -608,21 +612,21 @@ void *socket_receive_thread(void* thread_context){
 
 
     // Can try using recvmmsg may be more efficient
- //       struct mmsghdr msgs[VLEN];
- //       struct iovec iovecs[VLEN];
+    //       struct mmsghdr msgs[VLEN];
+    //       struct iovec iovecs[VLEN];
     while(1) {
         // find the next location in the ring buffer
         unsigned char* packet_buffer = context->buffer + (context->buffer_write_position%NUM_PACKET_BUFFERS)*PACKET_BUFFER_SIZE;
         ssize_t retval = recv(sock, (void*)packet_buffer,PACKET_BUFFER_SIZE,0);
-/*           memset(msgs, 0, sizeof(msgs));
-           for (int i=0; i < VLEN; ++i){
-           iovecs[i].iov_base         = context->buffer + ((context->buffer_write_position+i)%NUM_PACKET_BUFFERS)*PACKET_BUFFER_SIZE;
-           iovecs[i].iov_len          = PACKET_BUFFER_SIZE;
-           msgs[i].msg_hdr.msg_iov    = &iovecs[i];
-           msgs[i].msg_hdr.msg_iovlen = 1;
-           }
-           int retval = recvmmsg(sock, msgs, VLEN, 0, &tv);
-*/
+        /*           memset(msgs, 0, sizeof(msgs));
+                     for (int i=0; i < VLEN; ++i){
+                     iovecs[i].iov_base         = context->buffer + ((context->buffer_write_position+i)%NUM_PACKET_BUFFERS)*PACKET_BUFFER_SIZE;
+                     iovecs[i].iov_len          = PACKET_BUFFER_SIZE;
+                     msgs[i].msg_hdr.msg_iov    = &iovecs[i];
+                     msgs[i].msg_hdr.msg_iovlen = 1;
+                     }
+                     int retval = recvmmsg(sock, msgs, VLEN, 0, &tv);
+                     */
         if (retval == -1 ){
             if (errno==EAGAIN) {
                 multilog(log,LOG_WARNING,"No packets recieved within 5 seconds... [ERRNO=%d '%s']\n",errno,strerror(errno));
@@ -676,21 +680,21 @@ unsigned char* get_random_packet_buffer(local_context_t* local_context){
 
 void monitor(int monitor_fd, char* state, local_context_t* context){
     if (monitor_fd > 0) {
-// fill string
+        // fill string
         snprintf(monitor_string, STRLEN, "%s %"PRId64" %"PRId64" %"PRId64" %"PRId64" %lf %"PRId64" %"PRId64" %"PRId64"\n",
                 state,
                 context->packet_count, context->dropped_packets,
                 context->block_count,context->packets_to_read, context->seconds_per_packet,
                 context->buffer_lag, context->max_buffer_lag, context->recent_buffer_lag);
         monitor_string[STRLEN-1]='\0';
-// write string
+        // write string
         write(monitor_fd,monitor_string,strlen(monitor_string));
     }
 }
 
 
 int band_select_to_frames_per_heap(uint64_t band_select) {
-//https://drive.google.com/file/d/1Dcp3hzQ37FaQsrmJCuuU-ry1TO9biQ90/view?usp=sharing
+    //https://drive.google.com/file/d/1Dcp3hzQ37FaQsrmJCuuU-ry1TO9biQ90/view?usp=sharing
     switch (band_select){
         case 0:
             return 64;
