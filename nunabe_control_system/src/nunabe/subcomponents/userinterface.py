@@ -13,14 +13,11 @@ class UserInterface(SubComponent):
 
     def loop(self):
         super().loop()
-        print("UI LOOP")
 
     def stop(self):
-        print("STOPit")
         super().stop()
 
     def final(self):
-        print("FINAL")
         super().final()
 
 

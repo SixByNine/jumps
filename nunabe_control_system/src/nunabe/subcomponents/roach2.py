@@ -4,6 +4,7 @@ import logging
 import time
 import math
 
+from .kill_processes import kill_processes
 from ..subcomponent import SubComponent, subcomponentmethod
 
 import uuid
@@ -25,6 +26,10 @@ class Roach2(SubComponent):
         This is the Roach Interface subcomponet. It is responsible with organising data streaming from the Roach into the ringbuffer
          """
         super().__init__(looptime=0.2)
+        self.high_proc = None
+        self.low_proc = None
+        self.mon_fifo = {}
+        self.ctl_fifo = {}
         self.backend = backend
         self.log = logging.getLogger("nunabe.roach2")
 
@@ -33,7 +38,10 @@ class Roach2(SubComponent):
 
         self.state = {'error': "",
                       'band_select': -1,
-                      'status': 'idle'}
+                      'roach2status': 'Not Programmed',
+                      'udpdb_low': 'Stopped',
+                      'udpdb_high': 'Stopped',
+                      'state': 'Idle'}
 
     @subcomponentmethod
     def reprogram(self, band_select, dont_actually_program=False):
@@ -44,6 +52,7 @@ class Roach2(SubComponent):
             self.log.critical(f"Invalid band_select chosen {band_select}")
 
         if dont_actually_program:
+            self.state['band_select'] = band_select
             return
 
         cmd = ['sudo', self.backend.config['roach2_settings']['roach2_reprogram_script'], f"{band_select}"]
@@ -58,20 +67,21 @@ class Roach2(SubComponent):
             ## all good!
             self.log.info(f"Roach2 programed ok")
             self.state['band_select'] = band_select
-            self.state['status'] = "ready"
+            self.state['roach2status'] = "Programmed"
         else:
             ## dada_db threw an error.
             self.log.error("Error trying to program roach2...")
             self.state['error'] = 'Could not program roach2'
+            self.state['roach2status'] = "Error"
 
+        self.backend.update_state({'roach2': self.state})
         return
 
     @subcomponentmethod
     def start_observation(self, observing_time):
-
+        self.close_pipes()
         low_chans_config = self.backend.config['roach2_settings']['low_chans_config']
         high_chans_config = self.backend.config['roach2_settings']['high_chans_config']
-        state = self.backend.state
 
         # source name,  centre freq are in the state.
         centre_freq = self.backend.config['telescope_settings']['centre_freq']
@@ -87,6 +97,7 @@ class Roach2(SubComponent):
 
         inv_cpu_map = dict((v, k) for k, v in self.backend.cpu_map.items())
         roach2_udpdb = self.backend.config['roach2_settings']['roach2_udpdb']
+
         def get_commandline(config, freq, bw):
             ifce = config['interface']
             socket_cpu = inv_cpu_map[f"roach2_socket_thread_{ifce}"]
@@ -103,17 +114,20 @@ class Roach2(SubComponent):
             os.mkfifo(ctl_fifo)
             os.mkfifo(mon_fifo)
 
-            return ['nice', '-n', str(nice),
-                    'taskset', '-c', str(dada_cpu),
-                    roach2_udpdb,
-                    '-I', config['addr'],
-                    '-p', str(config['port']),
-                    '-C', ctl_fifo,
-                    '-M', mon_fifo,
-                    '-f', str(freq),
-                    '-b', str(bw),
-                    '-c', str(socket_cpu),
-                    '-T', str(observing_time)], ctl_fifo, mon_fifo
+            cmd = ['nice', '-n', str(nice),
+                   'taskset', '-c', str(dada_cpu),
+                   roach2_udpdb,
+                   '-I', config['addr'],
+                   '-p', str(config['port']),
+                   '-k', config['dada']['key'],
+                   '-C', ctl_fifo,
+                   '-M', mon_fifo,
+                   '-f', str(freq),
+                   '-b', str(bw),
+                   '-c', str(socket_cpu),
+                   '-T', str(observing_time)]
+            cmd.extend(config['extra_cmd_options'])
+            return cmd, ctl_fifo, mon_fifo
 
         # Start the roach2_udpdb programmes to listen.
 
@@ -127,10 +141,16 @@ class Roach2(SubComponent):
         self.low_proc = subprocess.Popen(low_cmd)
 
         self.log.info("! " + " ".join(high_cmd))
-        self.high_proc = subprocess.Popen(high_cmd)
+        self.high_proc = subprocess.Popen(high_cmd) 
 
+        self.mon_fifo = dict(low=os.fdopen(os.open(low_mon_fifo_f, os.O_RDONLY | os.O_NONBLOCK)),
+                             high=os.fdopen(os.open(high_mon_fifo_f, os.O_RDONLY | os.O_NONBLOCK)))
         self.ctl_fifo = dict(low=open(low_ctl_fifo_f, 'w'), high=open(high_ctl_fifo_f, 'w'))
-        self.mon_fifo = dict(low=open(low_mon_fifo_f, 'r'), high=open(high_mon_fifo_f, 'r'))
+
+        self.state['udpdb_low'] = 'Launched'
+        self.state['udpdb_high'] = 'Launched'
+        self.state['state'] = 'Running'
+        self.backend.update_state({'roach2': self.state})
 
         ## @todo Triger the 1pps!
 
@@ -144,35 +164,72 @@ class Roach2(SubComponent):
 
     @subcomponentmethod
     def cleanup_observation(self):
-        # If the processes are somehow still running, stop them
-        self.low_proc.terminate()
-        self.high_proc.terminate()
-        try:
-            self.low_proc.wait(timeout=0.1)
-        except:
-            pass
-        try:
-            self.high_proc.wait(timeout=0.1)
-        except:
-            pass
-        # If they are still running at this point, force kill them
-        self.low_proc.kill()
-        self.high_proc.kill()
-        # Will throw an error if they are somehow still running...
-        self.low_proc.wait(timeout=1.0)
-        self.high_proc.wait(timeout=1.0)
+        kill_processes([self.low_proc,self.high_proc]) 
+        
+        self.close_pipes()
 
-        # Close the pipes...
-        for pair_of_pipes in zip(self.mon_fifo.values(), self.ctl_fifo.values()):
-            for pipe in pair_of_pipes:
-                pipe.close()
-                os.unlink(pipe.name)
+        self.state['udpdb_low'] = 'Stopped'
+        self.state['udpdb_high'] = 'Stopped'
+        self.state['state'] = 'Idle'
+        self.backend.update_state({'roach2': self.state})
 
         return
 
+    
+
+    def close_pipes(self):
+        # Close the pipes...
+        for pair_of_pipes in zip(self.mon_fifo.values(), self.ctl_fifo.values()):
+            for pipe in pair_of_pipes:
+                try:
+                    pipe.close()
+                except:
+                    pass
+                try:
+                    os.unlink(pipe.name)
+                except:
+                    pass
+            self.mon_fifo = {}
+            self.ctl_fifo = {}
+
     def loop(self):
         super().loop()
-        print("ROACH LOOP")
+        if self.state['state'] == 'Running':
+            # We should be observing!
+            # state,
+            # context->packet_count, context->dropped_packets,
+            # context->block_count, context->packets_to_read, context->seconds_per_packet,
+            # context->buffer_lag, context->max_buffer_lag, context->recent_buffer_lag,context->number_of_overruns,
+            # NUM_PACKET_BUFFERS);
+            for key in self.mon_fifo:
+                while line := self.mon_fifo[key].readline():
+                    e = line.split()
+                    state = e[0]
+                    packet_count = int(e[1])
+                    dropped_packets = int(e[2])
+                    block_count = int(e[3])
+                    packets_to_read = int(e[4])
+                    seconds_per_packet = float(e[5])
+                    buffer_lag = int(e[6])
+                    max_buffer_lag = int(e[7])
+                    recent_buffer_lag = int(e[8])
+                    number_of_overruns = int(e[9])
+                    buffer_size = int(e[10])
+                    self.state[f'udpdb_{key}'] = state
+                    self.state[f'udpdb_progress_{key}'] = dict(recorded=seconds_per_packet * packet_count,
+                                                               remaining=seconds_per_packet * (
+                                                                       packets_to_read - packet_count))
+                    self.state[f'udpdb_buffer_{key}'] = dict(buffer_lag=buffer_lag, max_buffer_lag=max_buffer_lag,
+                                                             recent_buffer_lag=recent_buffer_lag,
+                                                             number_of_overruns=number_of_overruns,
+                                                             buffer_size=buffer_size)
+                    self.state[f'udpdb_packets_{key}'] = dict(packet_count=packet_count,
+                                                              dropped_packets=dropped_packets,
+                                                              block_count=block_count, packets_to_read=packets_to_read,
+                                                              seconds_per_packet=seconds_per_packet)
+                    self.log.info(
+                        f"{state} ({key}) {seconds_per_packet * packet_count}s Dropped packets: {dropped_packets} Overruns: {number_of_overruns}")
+
         self.backend.update_state({"roach2": self.state})
 
     def start(self):
@@ -183,6 +240,7 @@ class Roach2(SubComponent):
 
     def stop(self):
         self.backend.log.info("Stopping ROACH interface")
+        self.abort_observation()
         try:
             shutil.rmtree(self.uwd)
         except IOError:

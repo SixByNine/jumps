@@ -14,14 +14,11 @@ class TelescopeInterface(SubComponent):
 
     def loop(self):
         super().loop()
-        print("TI LOOP")
 
     def stop(self):
-        print("STOPit")
         super().stop()
 
     def final(self):
-        print("FINAL")
         super().final()
 
 

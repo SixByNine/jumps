@@ -681,11 +681,12 @@ unsigned char* get_random_packet_buffer(local_context_t* local_context){
 void monitor(int monitor_fd, char* state, local_context_t* context){
     if (monitor_fd > 0) {
         // fill string
-        snprintf(monitor_string, STRLEN, "%s %"PRId64" %"PRId64" %"PRId64" %"PRId64" %lf %"PRId64" %"PRId64" %"PRId64"\n",
+        snprintf(monitor_string, STRLEN, "%s %"PRId64" %"PRId64" %"PRId64" %"PRId64" %lf %"PRId64" %"PRId64" %"PRId64" %"PRId64" %d\n",
                 state,
                 context->packet_count, context->dropped_packets,
                 context->block_count,context->packets_to_read, context->seconds_per_packet,
-                context->buffer_lag, context->max_buffer_lag, context->recent_buffer_lag);
+                context->buffer_lag, context->max_buffer_lag, context->recent_buffer_lag,
+                context->number_of_overruns,NUM_PACKET_BUFFERS);
         monitor_string[STRLEN-1]='\0';
         // write string
         write(monitor_fd,monitor_string,strlen(monitor_string));

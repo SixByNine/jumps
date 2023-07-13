@@ -5,7 +5,9 @@ import sys
 
 be = nunabe.NunaBackend()
 
+
 be.start()
+be.update_state({'source_name':'B0329+54'})
 #be.debug()
 
 be.digitiser_interface.reprogram(band_select=0,dont_actually_program=True)

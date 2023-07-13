@@ -57,11 +57,17 @@ class Ringbuffer(SubComponent):
             self.log.error(f"dada_db could not create ringbuffer exit={ret.returncode}")
             self.states[label]['error'] = 'Could not create'
 
+        self.backend.update_state({'ringbuffer': self.states})
+
     @subcomponentmethod
     def destroy_buffer(self, label):
         self.log.info(f"destroy ringbuffer {label}")
         if label not in self.states:
             self.log.warning(f"Ringbuffer {label} does not exist yet, ignoring...")
+            return
+
+        if self.states[label]['nbufs']==0:
+            self.log.info(f"ringbuffer {label} already stopped")
             return
 
         key = self.keys[label]
@@ -85,6 +91,8 @@ class Ringbuffer(SubComponent):
             self.log.info(f"dada_db could not destroy ringbuffer exit={ret.returncode}")
             self.states[label]['error'] = 'Could not destroy'
 
+        self.backend.update_state({'ringbuffer': self.states})
+
     def loop(self):
         """
         This routine is called every loop of this subcomponent
@@ -96,7 +104,7 @@ class Ringbuffer(SubComponent):
             if self.states[label]['ready']:
                 cmd = ['dada_dbmetric', '-k', self.states[label]['key']]
                 try:
-                    self.log.info("! " + " ".join(cmd))
+                    self.log.debug("! " + " ".join(cmd))
                     ret = subprocess.run(cmd, timeout=0.1, encoding='utf-8',capture_output=True)
                     self.log.debug(f"dada_dbmetric: '{ret.stderr}'")
 
@@ -110,8 +118,7 @@ class Ringbuffer(SubComponent):
                     self.backend.logerr("dada_dbmetric timed out")
                     self.states[label]['error'] = 'Could not monitor: Timeout'
 
-        state = {'ringbuffer': self.states}
-        self.backend.update_state(state)
+        self.backend.update_state({'ringbuffer': self.states})
 
     def handle_exception(self, e):
         self.log.critical(f"Exception raised!! '{e}'")

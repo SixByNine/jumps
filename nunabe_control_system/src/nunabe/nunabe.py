@@ -2,8 +2,8 @@ import queue
 import logging
 import threading
 import copy
-import uuid
-import os
+import signal
+import time
 
 from . import subcomponents
 from .subcomponent import SubComponent, subcomponentmethod
@@ -36,6 +36,7 @@ class NunaBackend(SubComponent):
         self.ringbuffer = subcomponents.Ringbuffer(self)
         self.telescopeinterface = subcomponents.TelescopeInterface(self)
         self.userinterface = subcomponents.UserInterface(self)
+        self.dspsr = subcomponents.Dspsr(self)
 
         # @todo: make this somehow settable.
         self.digitiser_interface = subcomponents.Roach2(self)
@@ -43,19 +44,27 @@ class NunaBackend(SubComponent):
         self.cpu_map = {}
 
     def initial_state(self):
-        return dict(status='Initialising', recording_status='Initialising')
+        return dict(status='Initialising', observation_status='Initialising',source_name='Unknown')
 
     def start(self):
         super().start()
+
+        def signal_handler(signum, frame):
+            self.log.warning("Caught SIGINT... stoping urgently")
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            self.stop()
+
+        signal.signal(signal.SIGINT, signal_handler)
         self.reload_configurations()
         self.config = self.get_configuration()
         self.monitor.start()
         self.ringbuffer.start()
         self.userinterface.start()
         self.telescopeinterface.start()
+        self.dspsr.start()
         self.digitiser_interface.start()
         self.log.info("Subcomponents Started")
-        self.state['recording_status'] = 'Ready'
+        self.state['observation_status'] = 'Ready'
         self.state['status'] = 'Ready'
 
     def loop(self):
@@ -63,6 +72,8 @@ class NunaBackend(SubComponent):
         pass
 
     def stop(self):
+
+        self.update_state({'observation_status': 'Shutdown', 'status': 'Stopping'})
         try:
             self.log.debug("Stop UserInterface")
             self.userinterface.stop()
@@ -83,6 +94,12 @@ class NunaBackend(SubComponent):
             self.digitiser_interface.stop()
         except Exception as e:
             self.log.error(e)
+        try:
+            self.log.debug("Stop DSPSR")
+            self.dspsr.stop()
+        except Exception as e:
+            self.log.error(e)
+
         super().stop()
         self.log.debug("Join Ringbuffer")
         self.ringbuffer.join()
@@ -93,6 +110,9 @@ class NunaBackend(SubComponent):
         self.log.debug("Join Digitiser")
         self.digitiser_interface.join()
 
+        self.dspsr.join()
+
+        self.update_state({'observation_status': 'Shutdown', 'status': 'Shutdown'})
         ## stop the monitor last so the user can see the shutdown state.
         self.log.debug("Stop Monitor")
         self.monitor.stop()
@@ -126,31 +146,44 @@ class NunaBackend(SubComponent):
         pass  ## to be implemented
 
     def get_configuration(self, config_name=None):
+        # @todo: replace this config stuff with a dataclass or something like that.
         ## To be implemented... currently just one hardcoded config whilst testing
         config = {}
-        config['dspsr_settings'] = {'run_dspsr': True,
-                                    'nbins': 1024,
-                                    'nchan': 1600}
+
         config['telescope_settings'] = dict(
             centre_freq=1532)  # Should this be in config or set by telescope system into state?
         config['system_settings'] = {'ncpu': 16}
 
-        low_ringbuffer = dict(label='low_subband', key='1010', bufsz=838860800, hdrsz=4096, nbufs=10)
-        high_ringbuffer = dict(label='high_subband', key='1020', bufsz=838860800, hdrsz=4096, nbufs=10)
+        low_ringbuffer = dict(label='low_subband', key='da10', bufsz=838860800, hdrsz=4096, nbufs=10)
+        high_ringbuffer = dict(label='high_subband', key='da20', bufsz=838860800, hdrsz=4096, nbufs=10)
 
         config['ringbuffers'] = [low_ringbuffer, high_ringbuffer]
 
         config['roach2_settings'] = {
             'low_chans_config': dict(addr='10.0.3.1', port=60000, ctl_fifo='low_chans_control_fifo',
                                      mon_fifo='low_chans_monitor_fifo', interface='ens1f1', priority=-10,
-                                     dada=low_ringbuffer),
+                                     dada=low_ringbuffer, extra_cmd_options=['-F']),
             'high_chans_config': dict(addr='10.0.3.2', port=60000, ctl_fifo='high_chans_control_fifo',
                                       mon_fifo='high_chans_monitor_fifo', interface='ens1f0', priority=-10,
-                                      dada=high_ringbuffer),
-            'roach2_reprogram_script':'/opt/roach2_control/reprogram.sh',
+                                      dada=high_ringbuffer, extra_cmd_options=['-F']),
+            'roach2_reprogram_script': '/opt/roach2_control/reprogram.sh',
             'roach2_udpdb': '/home/mkeith/jumps/roach2_software/roach2_udpdb/roach2_udpdb',
             'interfaces': ['ens1f0', 'ens1f1']
         }
+
+        skz_options = "-skz -skzn 5 -skzm 256 -overlap -skz_start 70 -skz_end 490 -skzs 4 -skz_no_fscr -skz_no_tscr".split()
+        dspsr_options = "-fft-bench -x 8192 -minram 8192".split()
+        dspsr_dict = dict(dspsr='/opt/psr_dev/bin/dspsr', nbins=1024, nchan=256, subint_seconds=10, cuda=None,threads=1,
+                          options=dspsr_options, skz_options=skz_options, dada=None,data_root=None)
+        config['dspsr'] = {'low_chans': dspsr_dict.copy(), 'high_chans': dspsr_dict.copy()}
+        config['dspsr']['low_chans']['dada'] = low_ringbuffer
+        config['dspsr']['low_chans']['cuda'] = 0
+        config['dspsr']['high_chans']['dada'] = high_ringbuffer
+        config['dspsr']['high_chans']['cuda'] = 1
+        config['dspsr']['low_chans']['data_root'] = '/mnt/data4/capture_tests/'
+        config['dspsr']['high_chans']['data_root'] = '/mnt/data2/capture_tests/'
+
+        self.update_state({'config': config})
         return config
 
     @subcomponentmethod
@@ -165,7 +198,7 @@ class NunaBackend(SubComponent):
 
         state = self.get_state()  ## Get the current state.
 
-        if state['recording_status'] == "recording":
+        if state['observation_status'] == "observing":
             ## we are already observing...
             if state['source_name'] == source_name:
                 self.log.info("Already started this source ({})".format(source_name))
@@ -182,7 +215,9 @@ class NunaBackend(SubComponent):
         self.cpu_map = {}
         # @todo: Maybe more thought could be added here...
         self.cpu_map = self.digitiser_interface.get_cpu_map(cpu_map=self.cpu_map)
+        self.cpu_map = self.dspsr.get_cpu_map(cpu_map=self.cpu_map)
 
+        self.log.info(f"CPU Map: {self.cpu_map}")
         # Once the CPU map is set, we can actually start the obseving
 
         # Create the ringbuffers
@@ -190,22 +225,34 @@ class NunaBackend(SubComponent):
             self.ringbuffer.destroy_buffer(kwargs['label'])
             self.ringbuffer.create_buffer(**kwargs)
         # Wait for the ringbuffers to start.
-        self.ringbuffer.execute_queue()
+        self.ringbuffer.wait()
+        # update the state
+        state = self.get_state()
+        for kwargs in self.config['ringbuffers']:
+            if not state['ringbuffer'][kwargs['label']]['ready']:
+                self.log.error("Could not start observation because a ringbuffer could not be created")
+                return
 
         # Start dspsr
         # @todo: implement this...
         # Wait for dspsr to start...
+        self.dspsr.start_observation()
+        self.dspsr.wait()
+        time.sleep(5)
+        # @todo: check that dspsr started correctly.
 
         # Finally triger the start with the digitiser
         self.digitiser_interface.start_observation(observing_time=observing_time)
-        self.digitiser_interface.execute_queue()
+        self.digitiser_interface.wait()
         # @todo: Check that we have started?
 
+        self.update_state({'observation_status': 'observing'})
 
         pass
 
     @subcomponentmethod
     def end_observation(self):
+        self.update_state({'observation_status': 'ready'})
         pass
 
     def debug(self, debug=True):

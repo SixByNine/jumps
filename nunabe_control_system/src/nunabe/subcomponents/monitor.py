@@ -2,12 +2,12 @@ import subprocess
 import logging
 from ..subcomponent import SubComponent, subcomponentmethod
 import queue
+import json
 
 
 class Monitor(SubComponent):
 
-
-    def __init__(self,backend):
+    def __init__(self, backend):
         """
         This is the monitor subcomponent. It is responsible for
           * Collating Logged Messages
@@ -21,7 +21,7 @@ class Monitor(SubComponent):
           If it becomes an issue we can try using asyncio, but for now keep it simple
          """
         super().__init__(looptime=0.2)
-        self.backend=backend
+        self.backend = backend
         self.log = logging.getLogger("nunabe.monitor")
 
     def start(self):
@@ -35,10 +35,12 @@ class Monitor(SubComponent):
             try:
                 record = self.backend.logqueue.get(block=0)
                 ## handle the records for the UI output.
-                #print(record) ## << Not this!
+                # print(record) ## << Not this!
             except queue.Empty:
                 break
-
+        be_state = self.backend.get_state()
+        with open("test.json", 'w') as f:
+            json.dump(be_state, f)
 
     def stop(self):
         self.log.info("STOP Monitor")
@@ -49,5 +51,5 @@ class Monitor(SubComponent):
         super().final()
 
     @subcomponentmethod
-    def update_state(self,state):
+    def update_state(self, state):
         self.state = state
