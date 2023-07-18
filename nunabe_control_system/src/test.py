@@ -15,10 +15,13 @@ be.digitiser_interface.execute_queue()
 
 print(be.digitiser_interface.get_cpu_map({}))
 
-be.start_observation("test",40)
+be.start_observation("test",1800)
 
-time.sleep(50)
+be.join()
+sys.exit()
 
+time.sleep(2000)
+## Todo... make it possible to just join and wait for it to end.
 be.stop()
 be.join()
 

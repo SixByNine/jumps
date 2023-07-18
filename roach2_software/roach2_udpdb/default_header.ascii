@@ -10,7 +10,7 @@ SOURCE       J0000+0000          # name of the astronomical source (dummy)
 RA           00:00:00.00000000   # Right Ascension of the source
 DEC          00:00:00.00000000   # Declination of the source
 TELESCOPE    jb                  # telescope name
-INSTRUMENT   jumps_roach2        # instrument name
+INSTRUMENT   ROACH2              # instrument name
 RECEIVER     Unset               # Name of the Rx used
 BASIS                            # Linear or Circular, set per Rx
 FREQ                             # centre frequency in MHz

@@ -29,6 +29,7 @@ class Dspsr(SubComponent):
 
     def stop(self):
         super().stop()
+        self.abort_observation()
 
     def final(self):
         super().final()
@@ -51,21 +52,23 @@ class Dspsr(SubComponent):
             for cpu in self.backend.cpu_map:
                 if self.backend.cpu_map[cpu] == f"dspsr_{key}":
                     cpus.append(str(cpu))
+
+
+            cmd = ['nice', '-n', str(config['priority'])]
             if cpus:
                 cpustr = ",".join(cpus)
-                cmd = ['taskset', '-c', cpustr]
-            else:
-                cmd = []
+                cmd.extend(['taskset', '-c', cpustr])
 
             cmd.extend([config['dspsr'],
                         '-L', config['subint_seconds'],
-                        '-t', config['threads'],
                         '-F', f"{config['nchan']}:D",
                         '-N', source_name
                         ])
 
             if config['cuda'] is not None:
                 cmd.extend(['-cuda', str(config['cuda'])])
+            if config['threads'] is not None:
+                cmd.extend(['-t',str(config['threads'])])
             cmd.extend(config['options'])
             cmd.extend(config['skz_options'])
 
@@ -99,7 +102,7 @@ class Dspsr(SubComponent):
         cmd = ['nvidia-smi', '--query-gpu=gpu_bus_id', '--format=csv,noheader,nounits']
         self.log.info("! " + " ".join(cmd))
 
-        ret = subprocess.run(cmd, timeout=0.1, encoding='utf-8', capture_output=True)
+        ret = subprocess.run(cmd, timeout=5.0, encoding='utf-8', capture_output=True)
         lines = ret.stdout.splitlines(keepends=False)
         self.log.debug(f"nvidia-smi {lines}")
         cuda_bus_locations = []
@@ -122,7 +125,8 @@ class Dspsr(SubComponent):
             else:
                 local_cpu_mask_int = 0xffffffff
 
-            need_to_allocate_cores = [f"dspsr_{id}"] * config[id]['threads']
+            threads = config[id]['threads'] if config[id]['threads'] else 2
+            need_to_allocate_cores = [f"dspsr_{id}"] * threads
             for icpu in range(self.backend.config['system_settings']['ncpu']):
                 if need_to_allocate_cores:
                     if (local_cpu_mask_int >> icpu) & 0x1 == 1 and icpu not in cpu_map:

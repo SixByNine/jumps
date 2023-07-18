@@ -31,16 +31,18 @@ class Ringbuffer(SubComponent):
         try:
             self.log.info("Flushing out any existing buffer at this key")
             self.log.info("! " + " ".join(cmd))
-            subprocess.run(cmd,timeout=0.1)
-        except:
-            pass
+            subprocess.run(cmd,timeout=5.0)
+        except subprocess.TimeoutExpired:
+            self.log.error("dada_db timed out destroying ringbuffer")
+            self.states[label]['error'] = 'Could not destroy: Timeout'
+            return
 
         cmd = [str(i) for i in ['dada_db', '-k', key, '-b', bufsz, '-a', hdrsz, '-n', nbufs, '-l']]
         self.keys[label] = key
         self.states[label] = newstate(key)
         try:
             self.log.info("! " + " ".join(cmd))
-            ret = subprocess.run(cmd, timeout=1.0)
+            ret = subprocess.run(cmd, timeout=5.0)
         except subprocess.TimeoutExpired:
             self.log.error("dada_db timed out creating ringbuffer")
             self.states[label]['error'] = 'Could not create: Timeout'
@@ -78,9 +80,9 @@ class Ringbuffer(SubComponent):
         cmd = ['dada_db', '-k', key, '-d']
         try:
             self.log.info("! " + " ".join(cmd))
-            ret = subprocess.run(cmd, timeout=1.0)
+            ret = subprocess.run(cmd, timeout=5.0)
         except subprocess.TimeoutExpired:
-            self.backend.logerr("dada_db timed out destroying ringbuffer")
+            self.log.err("dada_db timed out destroying ringbuffer")
             self.states[label]['error'] = 'Could not destroy: Timeout'
             return
         if ret.returncode == 0:

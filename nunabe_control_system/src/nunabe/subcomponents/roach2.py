@@ -101,7 +101,7 @@ class Roach2(SubComponent):
         def get_commandline(config, freq, bw):
             ifce = config['interface']
             socket_cpu = inv_cpu_map[f"roach2_socket_thread_{ifce}"]
-            dada_cpu = inv_cpu_map[f"roach2_socket_thread_{ifce}"]
+            dada_cpu = inv_cpu_map[f"roach2_dada_thread_{ifce}"]
             nice = config['priority']
             ctl_fifo = os.path.join(self.uwd, config['ctl_fifo'])
             mon_fifo = os.path.join(self.uwd, config['mon_fifo'])

@@ -496,8 +496,9 @@ int main (int argc, char **argv)
 
         // Logic to decide if the packet is what we wanted or if we need to do something else.
         if (frame_counter > expected_frame_counter) {
-            local_context->dropped_packets += (frame_counter - expected_frame_counter ) / frame_increment;
-            for (uint64_t i = expected_frame_counter; i < frame_counter; i+=frame_increment) {
+            uint64_t ndropped = (frame_counter - expected_frame_counter ) /frame_increment;
+            local_context->dropped_packets += ndropped;
+            for (uint64_t i = 0 ; i < ndropped; ++i) {
                 // write some fake data packets where they were dropped.
                 // we grab a random packet from the buffer to use as data.
                 // be careful not to overwrite any important variables for the actual packet we are working on!
@@ -507,14 +508,15 @@ int main (int argc, char **argv)
                 assert(data_size==expected_data_size);
                 ipcio_write (hdu->data_block, junk_data_pointer, junk_data_size);
             }
-            local_context->packet_count += (frame_counter - expected_frame_counter ) /frame_increment;
+            multilog(log,LOG_WARNING,"Injected %d randomly sampled packets... %"PRIu64"/%"PRIu64"\n",ndropped,frame_counter,expected_frame_counter);
+            local_context->packet_count += ndropped;
+            expected_frame_counter = frame_counter; // we caught up the frames, set the expected frame counter to the current one...
         }
         if (frame_counter < expected_frame_counter) {
-
             // @TODO: How do we actually handle out of sequence packets?
             if (frame_counter == 0){
                 // we must have re-set the frame counter.
-                multilog(log,LOG_ERR,"Unexpected frame counter reset. Timing integrity lost. Aborting observation");
+                multilog(log,LOG_ERR,"Unexpected frame counter reset. Timing integrity lost. Aborting observation\n");
                 break;
             } else {
                 multilog(log,LOG_WARNING,"Discarding out of sequence packet. frame counter %"PRIu64" expected %"PRIu64"\n",frame_counter,expected_frame_counter);

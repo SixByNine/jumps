@@ -61,7 +61,7 @@ class SubComponent():
         self.function_queue.join()
 
     def join(self):
-        self.stop()
+        #self.stop()
         self.thread.join()
 
     def execute_queue(self):

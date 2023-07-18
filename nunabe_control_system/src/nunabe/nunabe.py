@@ -154,8 +154,8 @@ class NunaBackend(SubComponent):
             centre_freq=1532)  # Should this be in config or set by telescope system into state?
         config['system_settings'] = {'ncpu': 16}
 
-        low_ringbuffer = dict(label='low_subband', key='da10', bufsz=838860800, hdrsz=4096, nbufs=10)
-        high_ringbuffer = dict(label='high_subband', key='da20', bufsz=838860800, hdrsz=4096, nbufs=10)
+        low_ringbuffer = dict(label='low_subband', key='1234', bufsz=838860800, hdrsz=4096, nbufs=20)
+        high_ringbuffer = dict(label='high_subband', key='2234', bufsz=838860800, hdrsz=4096, nbufs=20)
 
         config['ringbuffers'] = [low_ringbuffer, high_ringbuffer]
 
@@ -173,15 +173,15 @@ class NunaBackend(SubComponent):
 
         skz_options = "-skz -skzn 5 -skzm 256 -overlap -skz_start 70 -skz_end 490 -skzs 4 -skz_no_fscr -skz_no_tscr".split()
         dspsr_options = "-fft-bench -x 8192 -minram 8192".split()
-        dspsr_dict = dict(dspsr='/opt/psr_dev/bin/dspsr', nbins=1024, nchan=256, subint_seconds=10, cuda=None,threads=1,
-                          options=dspsr_options, skz_options=skz_options, dada=None,data_root=None)
+        dspsr_dict = dict(dspsr='/opt/psr_dev/bin/dspsr', nbins=1024, nchan=256, subint_seconds=10, cuda=None,threads=None,
+                          options=dspsr_options, skz_options=skz_options, dada=None,data_root=None, priority=-10)
         config['dspsr'] = {'low_chans': dspsr_dict.copy(), 'high_chans': dspsr_dict.copy()}
         config['dspsr']['low_chans']['dada'] = low_ringbuffer
-        config['dspsr']['low_chans']['cuda'] = 0
+        config['dspsr']['low_chans']['cuda'] = 1
         config['dspsr']['high_chans']['dada'] = high_ringbuffer
-        config['dspsr']['high_chans']['cuda'] = 1
+        config['dspsr']['high_chans']['cuda'] = 0
         config['dspsr']['low_chans']['data_root'] = '/mnt/data4/capture_tests/'
-        config['dspsr']['high_chans']['data_root'] = '/mnt/data2/capture_tests/'
+        config['dspsr']['high_chans']['data_root'] = '/mnt/data1/capture_tests/'
 
         self.update_state({'config': config})
         return config
@@ -238,7 +238,7 @@ class NunaBackend(SubComponent):
         # Wait for dspsr to start...
         self.dspsr.start_observation()
         self.dspsr.wait()
-        time.sleep(5)
+        time.sleep(1)
         # @todo: check that dspsr started correctly.
 
         # Finally triger the start with the digitiser
