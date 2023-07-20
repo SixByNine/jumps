@@ -69,7 +69,7 @@ class Roach2(SubComponent):
             self.state['band_select'] = band_select
             self.state['roach2status'] = "Programmed"
         else:
-            ## dada_db threw an error.
+            ## command threw an error.
             self.log.error("Error trying to program roach2...")
             self.state['error'] = 'Could not program roach2'
             self.state['roach2status'] = "Error"
@@ -229,6 +229,19 @@ class Roach2(SubComponent):
                                                               seconds_per_packet=seconds_per_packet)
                     self.log.info(
                         f"{state} ({key}) {seconds_per_packet * packet_count}s Dropped packets: {dropped_packets} Overruns: {number_of_overruns}")
+            completed=0
+            errors=0
+            for proc in [self.low_proc, self.high_proc]:
+                ret = proc.poll()
+                if ret is not None:
+                    if ret == 0:
+                        completed+=1
+                    else:
+                        errors +=1
+            if errors > 0:
+                self.state['state'] = 'Error'
+            if completed and completed == 2:
+                self.state['state'] = 'Completed'
 
         self.backend.update_state({"roach2": self.state})
 
@@ -237,6 +250,23 @@ class Roach2(SubComponent):
         self.uuid = str(uuid.uuid4())
         self.uwd = os.path.join("/tmp", f"nunabe_roach2_{self.uuid}")
         os.makedirs(self.uwd)
+
+        cmd = ['sudo', self.backend.config['roach2_settings']['roach2_network_init_script']]
+        try:
+            self.log.info("! " + " ".join(cmd))
+            ret = subprocess.run(cmd, timeout=30.0)  # allow 30s for it to program
+        except subprocess.TimeoutExpired:
+            self.log.error("Timeout trying to configure network")
+            self.state['error'] = 'Could not configure network (timeout)'
+            return
+        if ret.returncode == 0:
+            ## all good!
+            self.log.info(f"Network configured ok")
+        else:
+            ## command threw an error.
+            self.log.error("Error trying to configure network for roach2...")
+            self.state['error'] = 'Could not configure network for roach2'
+            self.state['roach2status'] = "Error"
 
     def stop(self):
         self.backend.log.info("Stopping ROACH interface")

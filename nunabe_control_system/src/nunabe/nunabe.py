@@ -15,7 +15,7 @@ class NunaBackend(SubComponent):
     """
 
     def __init__(self):
-        super().__init__(looptime=10)
+        super().__init__(looptime=1)
         self.config = None
         self.state = self.initial_state()
         ## The state lock is used when someone wants to make significant changes to the state of the backend
@@ -44,7 +44,7 @@ class NunaBackend(SubComponent):
         self.cpu_map = {}
 
     def initial_state(self):
-        return dict(status='Initialising', observation_status='Initialising',source_name='Unknown')
+        return dict(status='Initialising', observation_status='Initialising', source_name='Unknown')
 
     def start(self):
         super().start()
@@ -64,12 +64,15 @@ class NunaBackend(SubComponent):
         self.dspsr.start()
         self.digitiser_interface.start()
         self.log.info("Subcomponents Started")
-        self.state['observation_status'] = 'Ready'
         self.state['status'] = 'Ready'
 
     def loop(self):
-        # Do stuff!
-        pass
+        # Check current state
+        self.check_observing_state()
+        state = self.get_state()
+        if state['observation_status'] == 'Completed':
+            self.digitiser_interface.cleanup_observation()
+            self.dspsr.cleanup_observation()
 
     def stop(self):
 
@@ -119,6 +122,10 @@ class NunaBackend(SubComponent):
         self.log.debug("Join Monitor")
         self.monitor.join()
 
+    @subcomponentmethod
+    def shutdown(self):
+        self.stop()
+
     def update_state(self, state):
         self.state_lock.acquire()
         for k in state:
@@ -167,14 +174,17 @@ class NunaBackend(SubComponent):
                                       mon_fifo='high_chans_monitor_fifo', interface='ens1f0', priority=-10,
                                       dada=high_ringbuffer, extra_cmd_options=['-F']),
             'roach2_reprogram_script': '/opt/roach2_control/reprogram.sh',
+            'roach2_1pps_sync_script': '/opt/roach2_control/sync_1pps.sh',
+            'roach2_network_init_script': '/opt/roach2_control/set_network_params.sh',
             'roach2_udpdb': '/home/mkeith/jumps/roach2_software/roach2_udpdb/roach2_udpdb',
             'interfaces': ['ens1f0', 'ens1f1']
         }
 
         skz_options = "-skz -skzn 5 -skzm 256 -overlap -skz_start 70 -skz_end 490 -skzs 4 -skz_no_fscr -skz_no_tscr".split()
         dspsr_options = "-fft-bench -x 8192 -minram 8192".split()
-        dspsr_dict = dict(dspsr='/opt/psr_dev/bin/dspsr', nbins=1024, nchan=256, subint_seconds=10, cuda=None,threads=None,
-                          options=dspsr_options, skz_options=skz_options, dada=None,data_root=None, priority=-10)
+        dspsr_dict = dict(dspsr='/opt/psr_dev/bin/dspsr', nbins=1024, nchan=256, subint_seconds=10, cuda=None,
+                          threads=None,
+                          options=dspsr_options, skz_options=skz_options, dada=None, data_root=None, priority=-10)
         config['dspsr'] = {'low_chans': dspsr_dict.copy(), 'high_chans': dspsr_dict.copy()}
         config['dspsr']['low_chans']['dada'] = low_ringbuffer
         config['dspsr']['low_chans']['cuda'] = 1
@@ -196,21 +206,26 @@ class NunaBackend(SubComponent):
          * Launch dspsr and any extra things...
         """
 
+        self.check_observing_state()
         state = self.get_state()  ## Get the current state.
 
-        if state['observation_status'] == "observing":
-            ## we are already observing...
-            if state['source_name'] == source_name:
-                self.log.info("Already started this source ({})".format(source_name))
-                # we already started on this source... do nothing
-                return
-            else:
-                self.log.warning("Trying to start a new observation before old one has been stopped...")
-                ## we need to stop and change to a new source!
-                self.end_observation()
-                self.start_observation(source_name)
-                return
+        if state['observation_status'] != "Ready":
+            if state['observation_status'] == "Observing":
+                ## we are already observing...
+                if state['source_name'] == source_name:
+                    self.log.info("Already started this source ({})".format(source_name))
+                    # we already started on this source... do nothing
+                    return
+                else:
+                    self.log.warning("Trying to start a new observation before old one has been stopped...")
+                    ## we need to stop and change to a new source!
+                    self.abort_observation()
+                    self.start_observation(source_name, observing_time)
+                    return
+            self.log.warning(f"Cannot start observation... not 'ready'. State is '{state['observation_status']}'")
+            return
 
+        self.update_state({'source_name':source_name})
         ## Assume for now we reset the cpu map each obesrvation.
         self.cpu_map = {}
         # @todo: Maybe more thought could be added here...
@@ -246,14 +261,49 @@ class NunaBackend(SubComponent):
         self.digitiser_interface.wait()
         # @todo: Check that we have started?
 
-        self.update_state({'observation_status': 'observing'})
+        self.update_state({'observation_status': 'Observing'})
 
         pass
 
     @subcomponentmethod
-    def end_observation(self):
-        self.update_state({'observation_status': 'ready'})
-        pass
+    def abort_observation(self):
+        self.update_state({'observation_status': 'stopping'})
+        # stop the data stream
+        self.digitiser_interface.abort_observation()
+        # wait 10s or so for dspsr to finish...
+        for tick in range(20):
+            time.sleep(0.5)
+            state = self.get_state()
+            wait = False
+            for k, v in state['dspsr']['processes'].items():
+                if v == 'Running':
+                    wait = True
+            if not wait:
+                break
+        self.dspsr.abort_observation()
+        self.update_state({'source_name': 'Unknown'})
+        self.check_observing_state()
+
+    def check_observing_state(self):
+        state = self.get_state()
+        detected_obs_state = "Invalid"
+        if 'dspsr' not in state or 'roach2' not in state:
+            self.update_state({'observation_status': detected_obs_state})
+            return
+
+        if state['dspsr']['state'] in ['Running','Completed'] and state['roach2']['state'] in ['Running','Completed']:
+            detected_obs_state = 'Observing'
+
+        if state['dspsr']['state'] in ['Completed','Idle'] and state['roach2']['state'] in ['Completed','Idle']:
+            detected_obs_state = 'Completed'
+
+        if state['dspsr']['state'] == 'Idle' and state['roach2']['state'] == 'Idle':
+            detected_obs_state = 'Ready'
+
+        if state['dspsr']['state'] == 'Error' or state['roach2']['state'] == 'Error':
+            detected_obs_state = 'Error'
+
+        self.update_state({'observation_status': detected_obs_state})
 
     def debug(self, debug=True):
         if debug:

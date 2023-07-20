@@ -17,7 +17,7 @@ class Dspsr(SubComponent):
         self.log = logging.getLogger("nunabe.dspsr")
 
         self.processes = {}
-        self.state = dict(error="", state="Idle")
+        self.state = dict(error="", state="Idle",processes={})
 
     def start(self):
         super().start()
@@ -25,6 +25,23 @@ class Dspsr(SubComponent):
 
     def loop(self):
         super().loop()
+        errors = 0
+        completed = 0
+        for key,proc in self.processes.items():
+            ret = proc.poll()
+            if ret is None:
+                self.state['processes'][key] = 'Running'
+            else:
+                if ret==0:
+                    self.state['processes'][key] = 'Completed'
+                    completed+=1
+                else:
+                    self.state['processes'][key] = 'Error'
+                    errors+=1
+        if errors > 0:
+            self.state['state']='Error'
+        if completed and completed == len(self.processes):
+            self.state['state']='Completed'
         self.backend.update_state({'dspsr': self.state})
 
     def stop(self):
@@ -84,6 +101,8 @@ class Dspsr(SubComponent):
             self.log.info(f"Starting dspsr ({key})")
             self.log.info("! " + " ".join(cmd))
             self.processes[key] = subprocess.Popen(cmd,cwd=data_path)
+            self.state['processes'][key] = 'Started'
+            self.state['state'] = "Running"
 
     @subcomponentmethod
     def abort_observation(self):
@@ -94,7 +113,7 @@ class Dspsr(SubComponent):
     def cleanup_observation(self):
         kill_processes(self.processes.values())
         self.processes = {}
-        pass
+        self.state['state'] = "Idle"
 
     def get_cpu_map(self, cpu_map):
         cpu_map = cpu_map.copy()
